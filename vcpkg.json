@@ -55,6 +55,11 @@
       "platform": "linux | freebsd"
     },
     {
+      "name": "libxkbcommon",
+      "version>=": "1.4.1",
+      "platform": "linux | freebsd"
+    },
+    {
       "name": "readline",
       "version>=": "0#5"
     },
