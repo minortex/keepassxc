@@ -300,7 +300,7 @@ void AutoType::executeAutoTypeActions(const Entry* entry,
         macUtils()->raiseLastActiveWindow();
         m_plugin->hideOwnWindow();
 #else
-        if (getMainWindow()) {
+        if (getMainWindow() && qApp->activeWindow()) {
             getMainWindow()->minimizeOrHide();
         }
 #endif

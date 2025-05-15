@@ -26,6 +26,7 @@
 #include <QDebug>
 #include <QDir>
 #include <QPointer>
+#include <QProcessEnvironment>
 #include <QRandomGenerator>
 #include <QStandardPaths>
 #include <QStyle>
@@ -289,6 +290,11 @@ bool NixUtils::triggerGlobalShortcut(uint keycode, uint modifiers)
 bool NixUtils::registerGlobalShortcut(const QString& name, Qt::Key key, Qt::KeyboardModifiers modifiers, QString* error)
 {
 #ifdef WITH_XC_X11
+    // If on Wayland, skip registering X11 shortcuts
+    if (QProcessEnvironment::systemEnvironment().contains("WAYLAND_DISPLAY")) {
+        return true;
+    }
+
     auto keycode = XKeysymToKeycode(dpy, qcharToNativeKeyCode(key));
     auto modifierscode = qtToNativeModifiers(modifiers);
 

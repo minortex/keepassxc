@@ -1,5 +1,7 @@
 find_package(Xkbcommon REQUIRED)
 
+include_directories(SYSTEM ${Xkbcommon_INCLUDE_DIRS})
+
 set(autotype_WAYLAND_SOURCES AutoTypeWayland.cpp)
 
 add_library(keepassxc-autotype-wayland MODULE ${autotype_WAYLAND_SOURCES})
