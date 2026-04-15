@@ -31,6 +31,7 @@ class AutoTypePlatformWayland : public QObject, public AutoTypePlatformInterface
 
 public:
     AutoTypePlatformWayland();
+    ~AutoTypePlatformWayland() override;
     bool isAvailable() override;
     void unload() override;
     QStringList windowTitles() override;
@@ -39,13 +40,23 @@ public:
     bool raiseWindow(WId window) override;
     AutoTypeExecutor* createExecutor() override;
 
-    AutoTypeAction::Result sendKey(xkb_keysym_t keysym, QVector<xkb_keysym_t> modifiers = {});
+    AutoTypeAction::Result sendKey(xkb_keysym_t keysym, Qt::KeyboardModifiers modifiers = Qt::NoModifier);
     void createSession();
+    void buildKeymap();
 
 private slots:
     void portalResponse(uint response, QVariantMap results, QDBusMessage message);
 
 private:
+    struct KeyDesc {
+        xkb_keysym_t sym;
+        xkb_keycode_t keycode;
+        xkb_layout_index_t layout;
+        xkb_mod_mask_t mod_mask;
+    };
+
+    bool lookupKeysym(xkb_keysym_t keysym, xkb_keycode_t* keycode, xkb_mod_mask_t* mod_mask);
+
     bool m_loaded;
     QDBusConnection m_bus;
     QMap<QString, std::function<void(uint, QVariantMap)>> m_handlers;
@@ -53,6 +64,10 @@ private:
     QDBusObjectPath m_session_handle;
     QString m_restore_token;
     bool m_session_started = false;
+
+    struct xkb_context* m_xkb_context = nullptr;
+    struct xkb_keymap* m_xkb_keymap = nullptr;
+    QList<KeyDesc> m_keymap;
 
     void handleCreateSession(uint response, QVariantMap results);
     void handleSelectDevices(uint response, QVariantMap results);

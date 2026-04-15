@@ -25,6 +25,16 @@
 #include <QDebug>
 #include <QRandomGenerator>
 
+#include <xkbcommon/xkbcommon.h>
+
+// evdev modifier keycodes (linux/input-event-codes.h)
+constexpr int EVDEV_KEY_LEFTCTRL = 29;
+constexpr int EVDEV_KEY_LEFTSHIFT = 42;
+constexpr int EVDEV_KEY_LEFTALT = 56;
+constexpr int EVDEV_KEY_LEFTMETA = 125;
+// XKB keycodes = evdev keycodes + 8
+constexpr int XKB_EVDEV_OFFSET = 8;
+
 QString generateToken()
 {
     static uint next = 0;
@@ -47,6 +57,16 @@ AutoTypePlatformWayland::AutoTypePlatformWayland()
                   SLOT(portalResponse(uint, QVariantMap, QDBusMessage)));
 
     createSession();
+}
+
+AutoTypePlatformWayland::~AutoTypePlatformWayland()
+{
+    if (m_xkb_keymap) {
+        xkb_keymap_unref(m_xkb_keymap);
+    }
+    if (m_xkb_context) {
+        xkb_context_unref(m_xkb_context);
+    }
 }
 
 void AutoTypePlatformWayland::createSession()
@@ -124,23 +144,121 @@ void AutoTypePlatformWayland::portalResponse(uint response, QVariantMap results,
     }
 }
 
-AutoTypeAction::Result AutoTypePlatformWayland::sendKey(xkb_keysym_t keysym, QVector<xkb_keysym_t> modifiers)
+void AutoTypePlatformWayland::buildKeymap()
 {
-    for (auto modifier : modifiers) {
-        m_remote_desktop.call(
-            "NotifyKeyboardKeysym", QVariant::fromValue(m_session_handle), QVariantMap(), int(modifier), uint(1));
+    if (m_xkb_keymap) {
+        xkb_keymap_unref(m_xkb_keymap);
+        m_xkb_keymap = nullptr;
+    }
+    if (m_xkb_context) {
+        xkb_context_unref(m_xkb_context);
+        m_xkb_context = nullptr;
     }
 
-    m_remote_desktop.call(
-        "NotifyKeyboardKeysym", QVariant::fromValue(m_session_handle), QVariantMap(), int(keysym), uint(1));
-
-    m_remote_desktop.call(
-        "NotifyKeyboardKeysym", QVariant::fromValue(m_session_handle), QVariantMap(), int(keysym), uint(0));
-
-    for (auto modifier : modifiers) {
-        m_remote_desktop.call(
-            "NotifyKeyboardKeysym", QVariant::fromValue(m_session_handle), QVariantMap(), int(modifier), uint(0));
+    m_xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+    if (!m_xkb_context) {
+        qWarning() << "Failed to create xkb_context";
+        return;
     }
+
+    // Uses system defaults (respects XKB_DEFAULT_RULES/MODEL/LAYOUT/VARIANT/OPTIONS env vars)
+    m_xkb_keymap = xkb_keymap_new_from_names(m_xkb_context, nullptr, XKB_KEYMAP_COMPILE_NO_FLAGS);
+    if (!m_xkb_keymap) {
+        qWarning() << "Failed to create xkb_keymap";
+        return;
+    }
+
+    m_keymap.clear();
+    xkb_keycode_t min_kc = xkb_keymap_min_keycode(m_xkb_keymap);
+    xkb_keycode_t max_kc = xkb_keymap_max_keycode(m_xkb_keymap);
+
+    for (xkb_keycode_t kc = min_kc; kc <= max_kc; kc++) {
+        xkb_layout_index_t num_layouts = xkb_keymap_num_layouts_for_key(m_xkb_keymap, kc);
+        for (xkb_layout_index_t layout = 0; layout < num_layouts; layout++) {
+            xkb_level_index_t num_levels = xkb_keymap_num_levels_for_key(m_xkb_keymap, kc, layout);
+            for (xkb_level_index_t level = 0; level < num_levels; level++) {
+                const xkb_keysym_t* syms;
+                int num_syms = xkb_keymap_key_get_syms_by_level(m_xkb_keymap, kc, layout, level, &syms);
+
+                xkb_mod_mask_t mod_mask = 0;
+                xkb_keymap_key_get_mods_for_level(m_xkb_keymap, kc, layout, level, &mod_mask, 1);
+
+                for (int s = 0; s < num_syms; s++) {
+                    m_keymap.append({syms[s], kc, layout, mod_mask});
+                }
+            }
+        }
+    }
+}
+
+bool AutoTypePlatformWayland::lookupKeysym(xkb_keysym_t keysym, xkb_keycode_t* keycode, xkb_mod_mask_t* mod_mask)
+{
+    for (const auto& key : m_keymap) {
+        if (key.sym == keysym) {
+            *keycode = key.keycode;
+            *mod_mask = key.mod_mask;
+            return true;
+        }
+    }
+    return false;
+}
+
+AutoTypeAction::Result AutoTypePlatformWayland::sendKey(xkb_keysym_t keysym, Qt::KeyboardModifiers modifiers)
+{
+    xkb_keycode_t keycode;
+    xkb_mod_mask_t mod_mask;
+
+    if (!lookupKeysym(keysym, &keycode, &mod_mask)) {
+        qWarning() << "Unable to find keycode for keysym:" << keysym;
+        return AutoTypeAction::Result::Failed(
+            QString("Unable to find keycode for keysym: %1").arg(keysym));
+    }
+
+    int evdev_keycode = keycode - XKB_EVDEV_OFFSET;
+
+    // Determine which modifier keycodes to press based on keymap lookup and explicit modifiers
+    xkb_mod_index_t shift_idx = xkb_keymap_mod_get_index(m_xkb_keymap, XKB_MOD_NAME_SHIFT);
+    xkb_mod_index_t ctrl_idx = xkb_keymap_mod_get_index(m_xkb_keymap, XKB_MOD_NAME_CTRL);
+    xkb_mod_index_t alt_idx = xkb_keymap_mod_get_index(m_xkb_keymap, XKB_MOD_NAME_ALT);
+    xkb_mod_index_t meta_idx = xkb_keymap_mod_get_index(m_xkb_keymap, XKB_MOD_NAME_LOGO);
+
+    QVector<int> mod_keycodes;
+
+    if ((shift_idx != XKB_MOD_INVALID && (mod_mask & (1 << shift_idx)))
+        || modifiers.testFlag(Qt::ShiftModifier)) {
+        mod_keycodes.append(EVDEV_KEY_LEFTSHIFT);
+    }
+    if ((ctrl_idx != XKB_MOD_INVALID && (mod_mask & (1 << ctrl_idx)))
+        || modifiers.testFlag(Qt::ControlModifier)) {
+        mod_keycodes.append(EVDEV_KEY_LEFTCTRL);
+    }
+    if ((alt_idx != XKB_MOD_INVALID && (mod_mask & (1 << alt_idx)))
+        || modifiers.testFlag(Qt::AltModifier)) {
+        mod_keycodes.append(EVDEV_KEY_LEFTALT);
+    }
+    if ((meta_idx != XKB_MOD_INVALID && (mod_mask & (1 << meta_idx)))
+        || modifiers.testFlag(Qt::MetaModifier)) {
+        mod_keycodes.append(EVDEV_KEY_LEFTMETA);
+    }
+
+    // Press modifiers (each is a separate D-Bus call, providing synchronization)
+    for (int mk : mod_keycodes) {
+        m_remote_desktop.call(
+            "NotifyKeyboardKeycode", QVariant::fromValue(m_session_handle), QVariantMap(), mk, uint(1));
+    }
+
+    // Press and release key
+    m_remote_desktop.call(
+        "NotifyKeyboardKeycode", QVariant::fromValue(m_session_handle), QVariantMap(), evdev_keycode, uint(1));
+    m_remote_desktop.call(
+        "NotifyKeyboardKeycode", QVariant::fromValue(m_session_handle), QVariantMap(), evdev_keycode, uint(0));
+
+    // Release modifiers (reverse order)
+    for (int i = mod_keycodes.size() - 1; i >= 0; i--) {
+        m_remote_desktop.call(
+            "NotifyKeyboardKeycode", QVariant::fromValue(m_session_handle), QVariantMap(), mod_keycodes[i], uint(0));
+    }
+
     return AutoTypeAction::Result::Ok();
 }
 
@@ -187,34 +305,16 @@ AutoTypeExecutorWayland::AutoTypeExecutorWayland(AutoTypePlatformWayland* platfo
 AutoTypeAction::Result AutoTypeExecutorWayland::execBegin(const AutoTypeBegin* action)
 {
     Q_UNUSED(action)
+    m_platform->buildKeymap();
     return AutoTypeAction::Result::Ok();
 }
 
 AutoTypeAction::Result AutoTypeExecutorWayland::execType(const AutoTypeKey* action)
 {
-    Q_UNUSED(action)
-
-    QVector<xkb_keysym_t> modifiers{};
-
-    if (action->modifiers.testFlag(Qt::ShiftModifier)) {
-        modifiers.append(XKB_KEY_Shift_L);
-    }
-    if (action->modifiers.testFlag(Qt::ControlModifier)) {
-        modifiers.append(XKB_KEY_Control_L);
-    }
-    if (action->modifiers.testFlag(Qt::AltModifier)) {
-        modifiers.append(XKB_KEY_Alt_L);
-    }
-    if (action->modifiers.testFlag(Qt::MetaModifier)) {
-        modifiers.append(XKB_KEY_Meta_L);
-    }
-
-    // TODO: Replace these with proper lookups to xkbcommon keysyms instead of just reusing the X11 ones
-    // They're mostly the same for most things, but strictly speaking differ slightly
     if (action->key != Qt::Key_unknown) {
-        m_platform->sendKey(qtToNativeKeyCode(action->key), modifiers);
+        m_platform->sendKey(qtToNativeKeyCode(action->key), action->modifiers);
     } else {
-        m_platform->sendKey(qcharToNativeKeyCode(action->character), modifiers);
+        m_platform->sendKey(qcharToNativeKeyCode(action->character), action->modifiers);
     }
 
     Tools::sleep(execDelayMs);
