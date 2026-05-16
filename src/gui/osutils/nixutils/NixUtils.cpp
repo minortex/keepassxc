@@ -17,6 +17,12 @@
 
 #include "NixUtils.h"
 
+#include "gui/MainWindow.h"
+#include "gui/MessageBox.h"
+#include "xdp_globalshortcuts.h"
+#include "xdp_request.h"
+#include "xdp_session.h"
+
 #include "config-keepassx.h"
 #include "core/Config.h"
 #include "core/Global.h"
@@ -30,6 +36,11 @@
 #include <QStandardPaths>
 #include <QStyle>
 #include <QTextStream>
+#include <QTimer>
+#include <qapplication.h>
+#include <qdbusextratypes.h>
+#include <qdbusmetatype.h>
+#include <qobject.h>
 #ifdef WITH_X11
 #include <QGuiApplication>
 
@@ -50,6 +61,15 @@ namespace
     }
 } // namespace
 #endif
+
+Q_GLOBAL_STATIC_WITH_ARGS(OrgFreedesktopPortalGlobalShortcutsInterface,
+                          s_shortcutsInterface,
+                          ("org.freedesktop.portal.Desktop",
+                           "/org/freedesktop/portal/desktop",
+                           QDBusConnection::sessionBus()));
+
+using XdpShortcut = QPair<QString, QVariantMap>;
+using XdpShortcuts = QList<XdpShortcut>;
 
 QPointer<NixUtils> NixUtils::m_instance = nullptr;
 
@@ -85,6 +105,22 @@ NixUtils::NixUtils(QObject* parent)
         "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.Settings", "Read");
     msg << QVariant("org.freedesktop.appearance") << QVariant("color-scheme");
     sessionBus.callWithCallback(msg, this, SLOT(handleColorSchemeRead(QDBusVariant)));
+}
+
+void NixUtils::initGlobalShortcutsSession()
+{
+    if (!externalGlobalShortcutsConfigurator() || !s_shortcutsInterface->isValid()) {
+        return;
+    }
+
+    qDBusRegisterMetaType<XdpShortcut>();
+    qDBusRegisterMetaType<XdpShortcuts>();
+
+    connect(s_shortcutsInterface, &OrgFreedesktopPortalGlobalShortcutsInterface::Activated, this, [this]() {
+        globalShortcutTriggered("autotype");
+    });
+
+    createGlobalShortcutsSession();
 }
 
 NixUtils::~NixUtils() = default;
@@ -290,6 +326,10 @@ bool NixUtils::triggerGlobalShortcut(uint keycode, uint modifiers)
 bool NixUtils::registerGlobalShortcut(const QString& name, Qt::Key key, Qt::KeyboardModifiers modifiers, QString* error)
 {
 #ifdef WITH_X11
+    if (QApplication::platformName() != "xcb") {
+        return true;
+    }
+
     auto keycode = XKeysymToKeycode(dpy, qtToNativeKeyCode(key));
     auto modifierscode = qtToNativeModifiers(modifiers);
 
@@ -411,4 +451,178 @@ quint64 NixUtils::getProcessStartTime() const
 
     qDebug() << "nixutils: failed to find ')' in " << processStatPath;
     return 0;
+}
+
+// Implements only 0.9+ requests where the path is known before making the call
+QString NixUtils::portalRequest(const std::function<void(uint, const QVariantMap&)> handler)
+{
+    static uint next;
+    auto bus = QDBusConnection::sessionBus();
+    auto token = QString("request_%1_%2").arg(++next).arg(QRandomGenerator::system()->generate());
+    auto sender = bus.baseService().remove(0, 1).replace(".", "_");
+
+    QStringList path;
+    path << "" << "org" << "freedesktop" << "portal" << "desktop" << "request" << sender << token;
+
+    auto req = new OrgFreedesktopPortalRequestInterface("org.freedesktop.portal.Desktop", path.join('/'), bus, this);
+    connect(req, &OrgFreedesktopPortalRequestInterface::Response, req, handler);
+    connect(req, &OrgFreedesktopPortalRequestInterface::Response, req, &QObject::deleteLater);
+
+    auto timer = new QTimer(req);
+    timer->setSingleShot(true);
+    connect(timer, &QTimer::timeout, req, [req]() {
+        qWarning() << "NixUtils::portalRequest: timed out waiting for portal response, closing request";
+        req->Close();
+        req->deleteLater();
+    });
+    connect(req, &OrgFreedesktopPortalRequestInterface::Response, timer, &QTimer::stop);
+    timer->start(30000);
+
+    return token;
+}
+
+bool NixUtils::externalGlobalShortcutsConfigurator()
+{
+    // TODO: allow overriding this in config to use with X11 if desired
+    return QApplication::platformName() == "wayland";
+}
+
+void NixUtils::bindShortcutsToCurrentSession()
+{
+    // Only attempt to restore bindings if previously configured
+    if (!config()->get(Config::GUI_XDPGlobalShortcutsConfigured).toBool()) {
+        return;
+    }
+
+    // Use ListShortcuts to check if shortcuts are already active (e.g. KDE session restoration), on GNOME we need to
+    // rebind them every time
+    auto listToken = portalRequest([this](uint listResponse, const QVariantMap& listResults) {
+        if (listResponse != 0) {
+            qWarning() << "NixUtils::bindShortcutsToCurrentSession ListShortcuts failed with response:" << listResponse;
+            return;
+        }
+
+        auto existing = qdbus_cast<XdpShortcuts>(listResults.value("shortcuts"));
+        if (!existing.isEmpty()) {
+            return; // already active, nothing to do
+        }
+
+        if (!m_globalShortcutsSession) {
+            qWarning() << "NixUtils::bindShortcutsToCurrentSession: session was closed, aborting bind";
+            return;
+        }
+
+        callBindShortcuts();
+    });
+
+    auto listReply = s_shortcutsInterface->ListShortcuts(QDBusObjectPath(m_globalShortcutsSession->path()),
+                                                         {{QLatin1String("handle_token"), listToken}});
+    listReply.waitForFinished();
+    if (listReply.isError()) {
+        qWarning() << "NixUtils::bindShortcutsToCurrentSession ListShortcuts failed:" << listReply.error().message();
+    }
+}
+
+void NixUtils::createGlobalShortcutsSession()
+{
+    auto handleToken = portalRequest([this](uint createSessionResponse, const QVariantMap& results) {
+        if (createSessionResponse != 0) {
+            qWarning() << "NixUtils::createGlobalShortcutsSession CreateSession got unexpected response from portal:"
+                       << createSessionResponse;
+            return;
+        }
+
+        m_globalShortcutsSession = new OrgFreedesktopPortalSessionInterface("org.freedesktop.portal.Desktop",
+                                                                            results["session_handle"].toString(),
+                                                                            QDBusConnection::sessionBus(),
+                                                                            this);
+        connect(m_globalShortcutsSession,
+                &OrgFreedesktopPortalSessionInterface::Closed,
+                m_globalShortcutsSession,
+                &QObject::deleteLater);
+        connect(m_globalShortcutsSession, &OrgFreedesktopPortalSessionInterface::Closed, this, [this]() {
+            m_globalShortcutsSession = nullptr;
+            QTimer::singleShot(1000, this, &NixUtils::createGlobalShortcutsSession);
+        });
+
+        bindShortcutsToCurrentSession();
+    });
+
+    auto sessionHandleToken = "keepassxc_" + QString::number(QRandomGenerator::global()->generate());
+    auto reply = s_shortcutsInterface->CreateSession({
+        {QLatin1String("session_handle_token"), sessionHandleToken},
+        {QLatin1String("handle_token"), handleToken},
+    });
+    reply.waitForFinished();
+    if (reply.isError()) {
+        qWarning() << "Failed to create Global Shortcuts session" << reply.error().message();
+    }
+}
+
+void NixUtils::configureGlobalShortcuts()
+{
+    if (!s_shortcutsInterface->isValid() || !m_globalShortcutsSession) {
+        MessageBox::warning(getMainWindow(),
+                            tr("KeePassXC - Global Shortcuts"),
+                            tr("The XDG Desktop Portal for global shortcuts is not available on this system."));
+        return;
+    }
+
+    // Use the config flag to determine if shortcuts have been configured before.
+    // We cannot use ListShortcuts here because on GNOME, ListShortcuts always returns empty
+    // even after BindShortcuts was called (newer GNOME auto-applies previously saved shortcuts
+    // silently without populating the session's shortcuts array). Relying on ListShortcuts
+    // would cause BindShortcuts to be called again, but the portal rejects it (bound=true),
+    // resulting in no dialog being shown.
+    if (config()->get(Config::GUI_XDPGlobalShortcutsConfigured).toBool()) {
+        // Already configured: portal v2+ can open a reconfiguration dialog directly
+        if (s_shortcutsInterface->version() >= 2) {
+            auto handleToken = portalRequest([](uint response, const QVariantMap&) { Q_UNUSED(response); });
+            auto reply = s_shortcutsInterface->ConfigureShortcuts(
+                QDBusObjectPath(m_globalShortcutsSession->path()), "", {{QLatin1String("handle_token"), handleToken}});
+            reply.waitForFinished();
+            if (!reply.isError()) {
+                return;
+            }
+
+            qWarning() << "NixUtils::configureGlobalShortcuts ConfigureShortcuts failed, falling through to dialog:"
+                       << reply.error().message();
+        }
+
+        // Portal v1 (e.g. GNOME): no reconfiguration API, direct the user to system settings
+        MessageBox::information(getMainWindow(),
+                                tr("KeePassXC - Global Shortcuts"),
+                                tr("Global shortcuts are already configured. "
+                                   "To change them, open your system settings and navigate to the "
+                                   "keyboard or application shortcuts section."));
+        return;
+    }
+
+    // First-time setup: use BindShortcuts to present the user with a system dialog.
+    // bindShortcutsToCurrentSession() skips BindShortcuts when the config flag is false,
+    // so the session's bound flag is still false and this call will succeed.
+    callBindShortcuts();
+}
+
+void NixUtils::callBindShortcuts()
+{
+    XdpShortcuts shortcuts = {
+        {QLatin1String("autotype"), {{QStringLiteral("description"), tr("Trigger global Auto-Type")}}}};
+
+    auto bindToken = portalRequest([](uint bindResponse, const QVariantMap&) {
+        if (bindResponse != 0) {
+            qWarning() << "NixUtils: BindShortcuts returned response" << bindResponse
+                       << "(shortcut may still be active; known GNOME desktop portal bug in older versions)";
+        }
+        // Setting this unconditionally because if the config is out-of-sync with system settings this'll ensure we
+        // rebind them on startup
+        config()->set(Config::GUI_XDPGlobalShortcutsConfigured, true);
+    });
+
+    auto reply = s_shortcutsInterface->BindShortcuts(
+        QDBusObjectPath(m_globalShortcutsSession->path()), shortcuts, "", {{QLatin1String("handle_token"), bindToken}});
+    reply.waitForFinished();
+    if (reply.isError()) {
+        qWarning() << "NixUtils::callBindShortcuts BindShortcuts failed:" << reply.error().message();
+    }
 }

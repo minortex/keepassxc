@@ -257,6 +257,22 @@ if(UNIX AND NOT APPLE)
         quickunlock/dbus/org.freedesktop.PolicyKit1.Authority.xml
         polkit_dbus
     )
+    qt6_add_dbus_interface(core_SOURCES
+        gui/osutils/nixutils/dbus/org.freedesktop.portal.Request.xml
+        xdp_request
+    )
+    qt6_add_dbus_interface(core_SOURCES
+        gui/osutils/nixutils/dbus/org.freedesktop.portal.Session.xml
+        xdp_session
+    )
+    qt6_add_dbus_interface(core_SOURCES
+        gui/osutils/nixutils/dbus/org.freedesktop.portal.GlobalShortcuts.xml
+        xdp_globalshortcuts
+    )
+    qt6_add_dbus_interface(core_SOURCES
+        gui/osutils/nixutils/dbus/org.freedesktop.portal.RemoteDesktop.xml
+        xdp_remotedesktop
+    )
 endif()
 
 if(WIN32)

@@ -398,6 +398,10 @@ void AutoType::performAutoTypeWithSequence(const Entry* entry, const QString& se
 
 void AutoType::startGlobalAutoType(const QString& search)
 {
+    if (!m_plugin) {
+        return;
+    }
+
     // Never Auto-Type into KeePassXC itself
     if (getMainWindow() && (qApp->activeWindow() || qApp->activeModalWidget())) {
         return;
@@ -472,9 +476,10 @@ void AutoType::performGlobalAutoType(const QList<QSharedPointer<Database>>& dbLi
         qWarning() << "Auto-Type: Window title was empty from the operating system";
     }
 
-    // Show the selection dialog if we always ask, have multiple matches, or no matches
+    // Show the selection dialog if we always ask, have multiple matches, no matches, or the window title was empty
     if (getMainWindow()
-        && (config()->get(Config::Security_AutoTypeAsk).toBool() || matchList.size() > 1 || matchList.isEmpty())) {
+        && (config()->get(Config::Security_AutoTypeAsk).toBool() || matchList.size() > 1 || matchList.isEmpty()
+            || m_windowTitleForGlobal.isEmpty())) {
         // Close any open modal windows that would interfere with the process
         getMainWindow()->closeModalWindow();
 
@@ -486,18 +491,19 @@ void AutoType::performGlobalAutoType(const QList<QSharedPointer<Database>>& dbLi
         }
 
         connect(getMainWindow(), &MainWindow::databaseLocked, selectDialog, &AutoTypeSelectDialog::reject);
-        connect(selectDialog,
-                &AutoTypeSelectDialog::matchActivated,
-                this,
-                [this](const AutoTypeMatch& match, bool virtualMode) {
-                    m_lastMatch = match;
-                    m_lastMatchRetypeTimer.start(config()->get(Config::GlobalAutoTypeRetypeTime).toInt() * 1000);
-                    executeAutoTypeActions(match.first,
-                                           match.second,
-                                           m_windowForGlobal,
-                                           virtualMode ? AutoTypeExecutor::Mode::VIRTUAL
-                                                       : AutoTypeExecutor::Mode::NORMAL);
-                });
+        connect(
+            selectDialog,
+            &AutoTypeSelectDialog::matchActivated,
+            this,
+            [this](const AutoTypeMatch& match, bool virtualMode) {
+                m_lastMatch = match;
+                m_lastMatchRetypeTimer.start(config()->get(Config::GlobalAutoTypeRetypeTime).toInt() * 1000);
+                executeAutoTypeActions(match.first,
+                                       match.second,
+                                       m_windowForGlobal,
+                                       virtualMode ? AutoTypeExecutor::Mode::VIRTUAL : AutoTypeExecutor::Mode::NORMAL);
+            },
+            Qt::QueuedConnection);
         connect(selectDialog, &QDialog::rejected, this, [this] {
             restoreWindowState();
             emit autotypeFinished();
@@ -510,6 +516,7 @@ void AutoType::performGlobalAutoType(const QList<QSharedPointer<Database>>& dbLi
         selectDialog->show();
         selectDialog->raise();
         selectDialog->activateWindow();
+        m_plugin->prepareForAutoType();
     } else if (!matchList.isEmpty()) {
         // Only one match and not asking, do it!
         executeAutoTypeActions(matchList.first().first, matchList.first().second, m_windowForGlobal);
@@ -750,6 +757,8 @@ AutoType::parseSequence(const QString& entrySequence, const Entry* entry, QStrin
             }
         }
     }
+
+    actions << QSharedPointer<AutoTypeEnd>::create();
 
     return actions;
 }

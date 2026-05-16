@@ -22,6 +22,9 @@
 #include <QAbstractNativeEventFilter>
 #include <QSharedPointer>
 #include <QtDBus/QDBusVariant>
+#include <functional>
+
+class OrgFreedesktopPortalSessionInterface;
 
 class NixUtils : public OSUtilsBase, QAbstractNativeEventFilter
 {
@@ -51,6 +54,14 @@ public:
     }
 
     quint64 getProcessStartTime() const;
+
+    bool externalGlobalShortcutsConfigurator() override;
+
+    void initGlobalShortcutsSession();
+    QString portalRequest(const std::function<void(uint, const QVariantMap&)> handler);
+
+public slots:
+    void configureGlobalShortcuts() override;
 
 private slots:
     void handleColorSchemeRead(QDBusVariant value);
@@ -87,6 +98,11 @@ private:
     bool m_systemColorschemePrefExists = false;
 
     void setColorScheme(QDBusVariant value);
+    void createGlobalShortcutsSession();
+    void bindShortcutsToCurrentSession();
+    void callBindShortcuts();
+
+    OrgFreedesktopPortalSessionInterface* m_globalShortcutsSession = nullptr;
 
     Q_DISABLE_COPY(NixUtils)
 };

@@ -72,6 +72,16 @@ public:
     virtual bool canPreventScreenCapture() const = 0;
     virtual bool setPreventScreenCapture(QWindow* window, bool allow) const;
 
+    virtual bool externalGlobalShortcutsConfigurator()
+    {
+        return false;
+    }
+
+public slots:
+    virtual void configureGlobalShortcuts()
+    {
+    }
+
 signals:
     void globalShortcutTriggered(const QString& name, const QString& search = {});
 

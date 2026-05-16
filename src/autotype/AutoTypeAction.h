@@ -118,6 +118,12 @@ public:
     Result exec(AutoTypeExecutor* executor) const override;
 };
 
+class KEEPASSXC_EXPORT AutoTypeEnd : public AutoTypeAction
+{
+public:
+    Result exec(AutoTypeExecutor* executor) const override;
+};
+
 class KEEPASSXC_EXPORT AutoTypeExecutor
 {
 public:
@@ -131,6 +137,10 @@ public:
     virtual AutoTypeAction::Result execBegin(const AutoTypeBegin* action) = 0;
     virtual AutoTypeAction::Result execType(const AutoTypeKey* action) = 0;
     virtual AutoTypeAction::Result execClearField(const AutoTypeClearField* action) = 0;
+    virtual AutoTypeAction::Result execEnd(const AutoTypeEnd*)
+    {
+        return AutoTypeAction::Result::Ok();
+    };
 
     int execDelayMs = 25;
     Mode mode = Mode::NORMAL;

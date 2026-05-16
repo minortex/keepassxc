@@ -154,6 +154,11 @@ void Application::bootstrap(const QString& uiLanguage)
     Bootstrap::bootstrap(uiLanguage);
 
     osUtils->registerNativeEventFilter();
+
+#if defined(Q_OS_UNIX) && !defined(Q_OS_MACOS)
+    nixUtils()->initGlobalShortcutsSession();
+#endif
+
     MessageBox::initializeButtonDefs();
 
 #ifdef Q_OS_MACOS

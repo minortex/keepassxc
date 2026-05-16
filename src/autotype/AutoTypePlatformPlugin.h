@@ -35,6 +35,10 @@ public:
     {
     }
 
+    virtual void prepareForAutoType()
+    {
+    }
+
     virtual AutoTypeExecutor* createExecutor() = 0;
 
 #if defined(Q_OS_MACOS)

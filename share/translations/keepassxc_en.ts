@@ -616,6 +616,30 @@
         <source>Auto-generate password for new entries</source>
         <translation type="unfinished"></translation>
     </message>
+    <message>
+        <source>Configure...</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Keep remote desktop connection open after performing Auto-Type</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Remote desktop mode:</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Never remember session</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Remember session until exit</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Remember session until revoked by desktop</source>
+        <translation type="unfinished"></translation>
+    </message>
 </context>
 <context>
     <name>ApplicationSettingsWidgetSecurity</name>
@@ -807,6 +831,29 @@
     </message>
     <message>
         <source>Sequence</source>
+        <translation type="unfinished"></translation>
+    </message>
+</context>
+<context>
+    <name>AutoTypePlatformWayland</name>
+    <message>
+        <source>Session closed</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>User cancelled the interaction</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>User interaction was canceled for unknown reason</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>No symbol found for key: &apos;%1&apos;</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>No symbol found for character: &apos;%1&apos;</source>
         <translation type="unfinished"></translation>
     </message>
 </context>
@@ -6656,6 +6703,22 @@ This version is not meant for production use.</source>
     </message>
     <message>
         <source>Could not register global shortcut</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>The XDG Desktop Portal for global shortcuts is not available on this system.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Trigger global Auto-Type</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>KeePassXC - Global Shortcuts</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Global shortcuts are already configured. To change them, open your system settings and navigate to the keyboard or application shortcuts section.</source>
         <translation type="unfinished"></translation>
     </message>
 </context>

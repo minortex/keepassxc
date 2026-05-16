@@ -66,6 +66,11 @@ AutoTypeAction::Result AutoTypeBegin::exec(AutoTypeExecutor* executor) const
     return executor->execBegin(this);
 }
 
+AutoTypeAction::Result AutoTypeEnd::exec(AutoTypeExecutor* executor) const
+{
+    return executor->execEnd(this);
+}
+
 AutoTypeMode::AutoTypeMode(AutoTypeExecutor::Mode mode)
     : mode(mode)
 {

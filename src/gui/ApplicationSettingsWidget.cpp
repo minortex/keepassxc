@@ -17,6 +17,7 @@
  */
 
 #include "ApplicationSettingsWidget.h"
+#include "gui/osutils/OSUtilsBase.h"
 #include "ui_ApplicationSettingsWidgetGeneral.h"
 #include "ui_ApplicationSettingsWidgetSecurity.h"
 #include <QDesktopServices>
@@ -86,6 +87,25 @@ ApplicationSettingsWidget::ApplicationSettingsWidget(QWidget* parent)
 
     if (!autoType()->isAvailable()) {
         m_generalUi->generalSettingsTabWidget->removeTab(1);
+    } else {
+        if (osUtils->externalGlobalShortcutsConfigurator()) {
+            m_generalUi->autoTypeShortcutWidget->setVisible(false);
+            m_generalUi->autoTypeShortcutConfigureButton->setVisible(true);
+            connect(m_generalUi->autoTypeShortcutConfigureButton,
+                    &QPushButton::clicked,
+                    osUtils,
+                    &OSUtilsBase::configureGlobalShortcuts);
+            // effectively these only get shown with the Wayland plugin enabled
+            m_generalUi->autoTypeDesktopPortalPersistConnectionCheckBox->setVisible(true);
+            m_generalUi->autoTypeDesktopPortalPersistModeLabel->setVisible(true);
+            m_generalUi->autoTypeDesktopPortalPersistModeComboBox->setVisible(true);
+        } else {
+            m_generalUi->autoTypeShortcutWidget->setVisible(true);
+            m_generalUi->autoTypeShortcutConfigureButton->setVisible(false);
+            m_generalUi->autoTypeDesktopPortalPersistConnectionCheckBox->setVisible(false);
+            m_generalUi->autoTypeDesktopPortalPersistModeLabel->setVisible(false);
+            m_generalUi->autoTypeDesktopPortalPersistModeComboBox->setVisible(false);
+        }
     }
 
     connect(this, SIGNAL(accepted()), SLOT(saveSettings()));
@@ -226,6 +246,10 @@ void ApplicationSettingsWidget::loadSettings()
     m_generalUi->autoTypeEntryTitleMatchCheckBox->setChecked(config()->get(Config::AutoTypeEntryTitleMatch).toBool());
     m_generalUi->autoTypeEntryURLMatchCheckBox->setChecked(config()->get(Config::AutoTypeEntryURLMatch).toBool());
     m_generalUi->autoTypeHideExpiredEntryCheckBox->setChecked(config()->get(Config::AutoTypeHideExpiredEntry).toBool());
+    m_generalUi->autoTypeDesktopPortalPersistConnectionCheckBox->setChecked(
+        config()->get(Config::AutoTypeDesktopPortalPersistConnection).toBool());
+    m_generalUi->autoTypeDesktopPortalPersistModeComboBox->setCurrentIndex(
+        config()->get(Config::AutoTypeDesktopPortalPersistMode).toUInt());
     m_generalUi->faviconTimeoutSpinBox->setValue(config()->get(Config::FaviconDownloadTimeout).toInt());
     m_generalUi->ConfirmMoveEntryToRecycleBinCheckBox->setChecked(
         !config()->get(Config::Security_NoConfirmMoveEntryToRecycleBin).toBool());
@@ -402,6 +426,10 @@ void ApplicationSettingsWidget::saveSettings()
     config()->set(Config::AutoTypeEntryTitleMatch, m_generalUi->autoTypeEntryTitleMatchCheckBox->isChecked());
     config()->set(Config::AutoTypeEntryURLMatch, m_generalUi->autoTypeEntryURLMatchCheckBox->isChecked());
     config()->set(Config::AutoTypeHideExpiredEntry, m_generalUi->autoTypeHideExpiredEntryCheckBox->isChecked());
+    config()->set(Config::AutoTypeDesktopPortalPersistConnection,
+                  m_generalUi->autoTypeDesktopPortalPersistConnectionCheckBox->isChecked());
+    config()->set(Config::AutoTypeDesktopPortalPersistMode,
+                  m_generalUi->autoTypeDesktopPortalPersistModeComboBox->currentIndex());
     config()->set(Config::FaviconDownloadTimeout, m_generalUi->faviconTimeoutSpinBox->value());
     config()->set(Config::Security_NoConfirmMoveEntryToRecycleBin,
                   !m_generalUi->ConfirmMoveEntryToRecycleBinCheckBox->isChecked());

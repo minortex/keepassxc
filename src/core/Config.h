@@ -64,6 +64,9 @@ public:
         AutoTypeHideExpiredEntry,
         AutoTypeDialogSortColumn,
         AutoTypeDialogSortOrder,
+        AutoTypeDesktopPortalPersistConnection,
+        AutoTypeDesktopPortalPersistMode,
+        AutoTypeDesktopPortalRestoreToken,
         GlobalAutoTypeKey,
         GlobalAutoTypeModifiers,
         GlobalAutoTypeRetypeTime,
@@ -104,6 +107,7 @@ public:
         GUI_ShowExpiredEntriesOnDatabaseUnlock,
         GUI_ShowExpiredEntriesOnDatabaseUnlockOffsetDays,
         GUI_FontSizeOffset,
+        GUI_XDPGlobalShortcutsConfigured,
 
         GUI_MainWindowGeometry,
         GUI_MainWindowState,
