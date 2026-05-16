@@ -305,7 +305,7 @@ void AutoType::executeAutoTypeActions(const Entry* entry,
         macUtils()->raiseLastActiveWindow();
         m_plugin->hideOwnWindow();
 #else
-        if (getMainWindow()) {
+        if (getMainWindow() && qApp->activeWindow()) {
             getMainWindow()->minimizeOrHide();
         }
 #endif
@@ -449,7 +449,7 @@ void AutoType::performGlobalAutoType(const QList<QSharedPointer<Database>>& dbLi
 
     QList<AutoTypeMatch> matchList;
     // Generate entry/sequence match list if there is a valid window title
-    if (!m_windowTitleForGlobal.isEmpty()) {
+    if (!m_windowTitleForGlobal.isEmpty() && QApplication::platformName().compare("wayland", Qt::CaseInsensitive) != 0) {
         bool hideExpired = config()->get(Config::AutoTypeHideExpiredEntry).toBool();
         for (const auto& db : dbList) {
             const QList<Entry*> dbEntries = db->rootGroup()->entriesRecursive();

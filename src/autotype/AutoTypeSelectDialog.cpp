@@ -132,8 +132,10 @@ void AutoTypeSelectDialog::submitAutoTypeMatch(AutoTypeMatch match)
 {
     if (match.first) {
         m_accepted = true;
+        setAttribute(Qt::WA_DeleteOnClose, false);
         accept();
         emit matchActivated(std::move(match), m_virtualMode);
+        deleteLater();
     }
 }
 
