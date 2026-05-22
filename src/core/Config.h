@@ -67,6 +67,7 @@ public:
         AutoTypeDesktopPortalPersistConnection,
         AutoTypeDesktopPortalPersistMode,
         AutoTypeDesktopPortalRestoreToken,
+        AutoTypePreHookCommand,
         GlobalAutoTypeKey,
         GlobalAutoTypeModifiers,
         GlobalAutoTypeRetypeTime,

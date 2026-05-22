@@ -27,6 +27,8 @@
 #include "autotype/AutoTypePlatformPlugin.h"
 #include "xdp_session.h"
 
+#include <xkbcommon/xkbcommon.h>
+
 class OrgFreedesktopPortalRequestInterface;
 
 class AutoTypePlatformWayland : public QObject, public AutoTypePlatformInterface
@@ -40,6 +42,7 @@ signals:
 
 public:
     AutoTypePlatformWayland();
+    ~AutoTypePlatformWayland() override;
     bool isAvailable() override;
     QStringList windowTitles() override;
     WId activeWindow() override;
@@ -55,15 +58,30 @@ public:
     const QString errorString() const;
 
 private:
+    friend class AutoTypeExecutorWayland;
+
+    struct KeyDesc
+    {
+        xkb_keysym_t sym;
+        xkb_keycode_t keycode;
+        xkb_mod_mask_t modMask;
+    };
+
     QString request(const std::function<void(const QVariantMap&)> handler);
     void tryStartSession();
     void selectDevices();
     void startSession();
+    void buildKeymap();
+    bool lookupKeysym(xkb_keysym_t keysym, xkb_keycode_t* keycode, xkb_mod_mask_t* modMask) const;
+    AutoTypeAction::Result sendKeycode(int keycode, uint state);
 
     bool m_sessionStarting = false;
     QString m_restoreToken;
     OrgFreedesktopPortalSessionInterface* m_remoteDesktopSession = nullptr;
     QString m_error = QString();
+    xkb_context* m_xkbContext = nullptr;
+    xkb_keymap* m_xkbKeymap = nullptr;
+    QList<KeyDesc> m_keymap;
 };
 
 class AutoTypeExecutorWayland : public AutoTypeExecutor

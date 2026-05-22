@@ -30,6 +30,12 @@
 
 #include <xkbcommon/xkbcommon.h>
 
+constexpr int EVDEV_KEY_LEFTCTRL = 29;
+constexpr int EVDEV_KEY_LEFTSHIFT = 42;
+constexpr int EVDEV_KEY_LEFTALT = 56;
+constexpr int EVDEV_KEY_LEFTMETA = 125;
+constexpr int XKB_EVDEV_OFFSET = 8;
+
 static xkb_keysym_t qtKeyToXkbKeysym(Qt::Key key)
 {
     switch (key) {
@@ -100,6 +106,16 @@ Q_GLOBAL_STATIC_WITH_ARGS(OrgFreedesktopPortalRemoteDesktopInterface,
 
 AutoTypePlatformWayland::AutoTypePlatformWayland()
 {
+}
+
+AutoTypePlatformWayland::~AutoTypePlatformWayland()
+{
+    if (m_xkbKeymap) {
+        xkb_keymap_unref(m_xkbKeymap);
+    }
+    if (m_xkbContext) {
+        xkb_context_unref(m_xkbContext);
+    }
 }
 
 void AutoTypePlatformWayland::prepareForAutoType()
@@ -309,6 +325,77 @@ bool AutoTypePlatformWayland::raiseWindow(WId window)
     return true;
 }
 
+void AutoTypePlatformWayland::buildKeymap()
+{
+    if (m_xkbKeymap) {
+        xkb_keymap_unref(m_xkbKeymap);
+        m_xkbKeymap = nullptr;
+    }
+    if (m_xkbContext) {
+        xkb_context_unref(m_xkbContext);
+        m_xkbContext = nullptr;
+    }
+    m_keymap.clear();
+    m_error = QString();
+
+    m_xkbContext = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+    if (!m_xkbContext) {
+        m_error = tr("Failed to create Wayland keyboard context");
+        return;
+    }
+
+    m_xkbKeymap = xkb_keymap_new_from_names(m_xkbContext, nullptr, XKB_KEYMAP_COMPILE_NO_FLAGS);
+    if (!m_xkbKeymap) {
+        m_error = tr("Failed to create Wayland keyboard map");
+        return;
+    }
+
+    m_keymap.clear();
+    const auto minKeycode = xkb_keymap_min_keycode(m_xkbKeymap);
+    const auto maxKeycode = xkb_keymap_max_keycode(m_xkbKeymap);
+
+    for (auto keycode = minKeycode; keycode <= maxKeycode; ++keycode) {
+        const auto layoutCount = xkb_keymap_num_layouts_for_key(m_xkbKeymap, keycode);
+        for (xkb_layout_index_t layout = 0; layout < layoutCount; ++layout) {
+            const auto levelCount = xkb_keymap_num_levels_for_key(m_xkbKeymap, keycode, layout);
+            for (xkb_level_index_t level = 0; level < levelCount; ++level) {
+                const xkb_keysym_t* syms = nullptr;
+                const auto symCount = xkb_keymap_key_get_syms_by_level(m_xkbKeymap, keycode, layout, level, &syms);
+
+                xkb_mod_mask_t modMask = 0;
+                xkb_keymap_key_get_mods_for_level(m_xkbKeymap, keycode, layout, level, &modMask, 1);
+
+                for (int symIndex = 0; symIndex < symCount; ++symIndex) {
+                    m_keymap.append({syms[symIndex], keycode, modMask});
+                }
+            }
+        }
+    }
+}
+
+bool AutoTypePlatformWayland::lookupKeysym(xkb_keysym_t keysym, xkb_keycode_t* keycode, xkb_mod_mask_t* modMask) const
+{
+    for (const auto& key : m_keymap) {
+        if (key.sym == keysym) {
+            *keycode = key.keycode;
+            *modMask = key.modMask;
+            return true;
+        }
+    }
+    return false;
+}
+
+AutoTypeAction::Result AutoTypePlatformWayland::sendKeycode(int keycode, uint state)
+{
+    auto reply = s_remoteDesktopInterface->NotifyKeyboardKeycode(
+        QDBusObjectPath(m_remoteDesktopSession->path()), {}, keycode, state);
+    reply.waitForFinished();
+    if (reply.isError()) {
+        return AutoTypeAction::Result::Failed(reply.error().message());
+    }
+    return AutoTypeAction::Result::Ok();
+}
+
 AutoTypeAction::Result AutoTypePlatformWayland::sendKey(const AutoTypeKey* action)
 {
     xkb_keysym_t keysym;
@@ -324,51 +411,80 @@ AutoTypeAction::Result AutoTypePlatformWayland::sendKey(const AutoTypeKey* actio
         }
     }
 
-    QVector<int> modKeys{};
-    if (action->modifiers & Qt::ShiftModifier) {
-        modKeys.append(XKB_KEY_Shift_L);
+    if (!m_remoteDesktopSession) {
+        return AutoTypeAction::Result::Failed(tr("Remote desktop session is not ready"));
     }
-    if (action->modifiers & Qt::ControlModifier) {
-        modKeys.append(XKB_KEY_Control_L);
-    }
-    if (action->modifiers & Qt::AltModifier) {
-        modKeys.append(XKB_KEY_Alt_L);
-    }
-    if (action->modifiers & Qt::MetaModifier) {
-        modKeys.append(XKB_KEY_Meta_L);
+    if (!m_xkbKeymap || m_keymap.isEmpty()) {
+        return AutoTypeAction::Result::Failed(tr("Wayland keyboard map is not available"));
     }
 
-    QDBusPendingReply<> reply;
+    xkb_keycode_t keycode = 0;
+    xkb_mod_mask_t modMask = 0;
+    if (!lookupKeysym(keysym, &keycode, &modMask)) {
+        return AutoTypeAction::Result::Failed(tr("No keycode found for symbol: '%1'").arg(keysym));
+    }
 
+    const auto evdevKeycode = static_cast<int>(keycode) - XKB_EVDEV_OFFSET;
+    if (evdevKeycode < 0) {
+        return AutoTypeAction::Result::Failed(tr("Invalid keycode found for symbol: '%1'").arg(keysym));
+    }
+
+    const auto shiftIndex = xkb_keymap_mod_get_index(m_xkbKeymap, XKB_MOD_NAME_SHIFT);
+    const auto ctrlIndex = xkb_keymap_mod_get_index(m_xkbKeymap, XKB_MOD_NAME_CTRL);
+    const auto altIndex = xkb_keymap_mod_get_index(m_xkbKeymap, XKB_MOD_NAME_ALT);
+    const auto metaIndex = xkb_keymap_mod_get_index(m_xkbKeymap, XKB_MOD_NAME_LOGO);
+
+    QVector<int> modKeys;
+    if ((shiftIndex != XKB_MOD_INVALID && (modMask & (xkb_mod_mask_t(1) << shiftIndex)))
+        || (action->modifiers & Qt::ShiftModifier)) {
+        modKeys.append(EVDEV_KEY_LEFTSHIFT);
+    }
+    if ((ctrlIndex != XKB_MOD_INVALID && (modMask & (xkb_mod_mask_t(1) << ctrlIndex)))
+        || (action->modifiers & Qt::ControlModifier)) {
+        modKeys.append(EVDEV_KEY_LEFTCTRL);
+    }
+    if ((altIndex != XKB_MOD_INVALID && (modMask & (xkb_mod_mask_t(1) << altIndex)))
+        || (action->modifiers & Qt::AltModifier)) {
+        modKeys.append(EVDEV_KEY_LEFTALT);
+    }
+    if ((metaIndex != XKB_MOD_INVALID && (modMask & (xkb_mod_mask_t(1) << metaIndex)))
+        || (action->modifiers & Qt::MetaModifier)) {
+        modKeys.append(EVDEV_KEY_LEFTMETA);
+    }
+
+    AutoTypeAction::Result result = AutoTypeAction::Result::Ok();
+    QVector<int> pressedModifiers;
     for (auto modifier : modKeys) {
-        reply = s_remoteDesktopInterface->NotifyKeyboardKeysym(
-            QDBusObjectPath(m_remoteDesktopSession->path()), {}, modifier, uint(1));
-        reply.waitForFinished();
-        if (reply.isError()) {
-            return AutoTypeAction::Result::Failed(reply.error().message());
+        result = sendKeycode(modifier, uint(1));
+        if (!result.isOk()) {
+            for (auto i = pressedModifiers.size() - 1; i >= 0; --i) {
+                sendKeycode(pressedModifiers[i], uint(0));
+            }
+            return result;
         }
+        pressedModifiers.append(modifier);
     }
 
-    reply = s_remoteDesktopInterface->NotifyKeyboardKeysym(
-        QDBusObjectPath(m_remoteDesktopSession->path()), {}, keysym, uint(1));
-    reply.waitForFinished();
-    if (reply.isError()) {
-        return AutoTypeAction::Result::Failed(reply.error().message());
+    result = sendKeycode(evdevKeycode, uint(1));
+    if (!result.isOk()) {
+        for (auto i = pressedModifiers.size() - 1; i >= 0; --i) {
+            sendKeycode(pressedModifiers[i], uint(0));
+        }
+        return result;
     }
 
-    reply = s_remoteDesktopInterface->NotifyKeyboardKeysym(
-        QDBusObjectPath(m_remoteDesktopSession->path()), {}, keysym, uint(0));
-    reply.waitForFinished();
-    if (reply.isError()) {
-        return AutoTypeAction::Result::Failed(reply.error().message());
+    result = sendKeycode(evdevKeycode, uint(0));
+    if (!result.isOk()) {
+        for (auto i = pressedModifiers.size() - 1; i >= 0; --i) {
+            sendKeycode(pressedModifiers[i], uint(0));
+        }
+        return result;
     }
 
-    for (auto modifier : modKeys) {
-        reply = s_remoteDesktopInterface->NotifyKeyboardKeysym(
-            QDBusObjectPath(m_remoteDesktopSession->path()), {}, modifier, uint(0));
-        reply.waitForFinished();
-        if (reply.isError()) {
-            return AutoTypeAction::Result::Failed(reply.error().message());
+    for (auto i = pressedModifiers.size() - 1; i >= 0; --i) {
+        result = sendKeycode(pressedModifiers[i], uint(0));
+        if (!result.isOk()) {
+            return result;
         }
     }
 
@@ -396,6 +512,12 @@ AutoTypeAction::Result AutoTypeExecutorWayland::execBegin(const AutoTypeBegin* a
         return AutoTypeAction::Result::Failed(error);
     }
 
+    m_platform->buildKeymap();
+    error = m_platform->errorString();
+    if (!error.isEmpty()) {
+        return AutoTypeAction::Result::Failed(error);
+    }
+
     return AutoTypeAction::Result::Ok();
 }
 
@@ -413,9 +535,24 @@ AutoTypeAction::Result AutoTypeExecutorWayland::execType(const AutoTypeKey* acti
 AutoTypeAction::Result AutoTypeExecutorWayland::execClearField(const AutoTypeClearField* action)
 {
     Q_UNUSED(action);
-    execType(new AutoTypeKey(Qt::Key_Home));
-    execType(new AutoTypeKey(Qt::Key_End, Qt::ShiftModifier));
-    execType(new AutoTypeKey(Qt::Key_Backspace));
+    AutoTypeKey home(Qt::Key_Home);
+    auto result = execType(&home);
+    if (!result.isOk()) {
+        return result;
+    }
+
+    AutoTypeKey end(Qt::Key_End, Qt::ShiftModifier);
+    result = execType(&end);
+    if (!result.isOk()) {
+        return result;
+    }
+
+    AutoTypeKey backspace(Qt::Key_Backspace);
+    result = execType(&backspace);
+    if (!result.isOk()) {
+        return result;
+    }
+
     return AutoTypeAction::Result::Ok();
 }
 

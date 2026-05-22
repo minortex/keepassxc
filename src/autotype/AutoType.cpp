@@ -21,6 +21,7 @@
 #include <QApplication>
 #include <QDebug>
 #include <QPluginLoader>
+#include <QProcess>
 #include <QRegularExpression>
 #include <QUrl>
 
@@ -318,6 +319,26 @@ void AutoType::executeAutoTypeActions(const Entry* entry,
 
     // Restore executor mode
     m_executor->mode = mode;
+
+    const auto preHookCommand = config()->get(Config::AutoTypePreHookCommand).toString().trimmed();
+    if (!preHookCommand.isEmpty()) {
+#ifdef Q_OS_UNIX
+        const auto exitCode = QProcess::execute(QStringLiteral("/bin/sh"), {QStringLiteral("-c"), preHookCommand});
+        if (exitCode != 0) {
+            m_inAutoType.unlock();
+            const auto errorMsg =
+                tr("The pre Auto-Type command failed with exit code %1:\n%2").arg(exitCode).arg(preHookCommand);
+            if (getMainWindow()) {
+                MessageBox::critical(getMainWindow(), tr("Auto-Type Error"), errorMsg);
+            }
+            qWarning() << errorMsg;
+            emit autotypeFinished();
+            return;
+        }
+#else
+        qWarning() << "Pre Auto-Type command is only supported on Unix-like systems";
+#endif
+    }
 
     // Initial Auto-Type delay to allow window to come to foreground
     Tools::wait(qBound(s_minWaitDelay, config()->get(Config::AutoTypeStartDelay).toInt(), s_maxWaitDelay));

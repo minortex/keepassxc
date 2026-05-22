@@ -250,6 +250,7 @@ void ApplicationSettingsWidget::loadSettings()
         config()->get(Config::AutoTypeDesktopPortalPersistConnection).toBool());
     m_generalUi->autoTypeDesktopPortalPersistModeComboBox->setCurrentIndex(
         config()->get(Config::AutoTypeDesktopPortalPersistMode).toUInt());
+    m_generalUi->autoTypePreHookCommandLineEdit->setText(config()->get(Config::AutoTypePreHookCommand).toString());
     m_generalUi->faviconTimeoutSpinBox->setValue(config()->get(Config::FaviconDownloadTimeout).toInt());
     m_generalUi->ConfirmMoveEntryToRecycleBinCheckBox->setChecked(
         !config()->get(Config::Security_NoConfirmMoveEntryToRecycleBin).toBool());
@@ -430,6 +431,7 @@ void ApplicationSettingsWidget::saveSettings()
                   m_generalUi->autoTypeDesktopPortalPersistConnectionCheckBox->isChecked());
     config()->set(Config::AutoTypeDesktopPortalPersistMode,
                   m_generalUi->autoTypeDesktopPortalPersistModeComboBox->currentIndex());
+    config()->set(Config::AutoTypePreHookCommand, m_generalUi->autoTypePreHookCommandLineEdit->text());
     config()->set(Config::FaviconDownloadTimeout, m_generalUi->faviconTimeoutSpinBox->value());
     config()->set(Config::Security_NoConfirmMoveEntryToRecycleBin,
                   !m_generalUi->ConfirmMoveEntryToRecycleBinCheckBox->isChecked());
