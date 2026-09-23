@@ -6,6 +6,8 @@ KeePassXC. The library intercepts the QtDBus generated-interface call for
 portal's EIS file descriptor with `ConnectToEIS`, and sends the key event with
 libei. Intercepting `QDBusConnection::call()` alone is insufficient because
 QtDBus resolves generated-interface calls inside its own library.
+The original QtDBus functions are located at runtime by their demangled C++
+signatures instead of hard-coded mangled names.
 
 Build it with:
 

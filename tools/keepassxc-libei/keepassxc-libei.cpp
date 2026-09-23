@@ -10,11 +10,14 @@
 #include <xkbcommon/xkbcommon.h>
 
 #include <dlfcn.h>
+#include <elf.h>
+#include <link.h>
 #include <poll.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <cxxabi.h>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
@@ -84,9 +87,88 @@ namespace
         log("loaded");
     }
 
-    template <typename T> T resolve(const char* symbol)
+    struct SymbolSearch
     {
-        return reinterpret_cast<T>(dlsym(RTLD_NEXT, symbol));
+        const char* wanted;
+        void* address = nullptr;
+    };
+
+    int findQtSymbol(struct dl_phdr_info* info, size_t, void* data)
+    {
+        auto* search = static_cast<SymbolSearch*>(data);
+        if (!info->dlpi_name || !std::strstr(info->dlpi_name, "libQt6DBus.so")) {
+            return 0;
+        }
+
+        const ElfW(Dyn)* dynamic = nullptr;
+        for (int i = 0; i < info->dlpi_phnum; ++i) {
+            if (info->dlpi_phdr[i].p_type == PT_DYNAMIC) {
+                dynamic = reinterpret_cast<const ElfW(Dyn)*>(info->dlpi_addr + info->dlpi_phdr[i].p_vaddr);
+                break;
+            }
+        }
+        if (!dynamic) {
+            return 0;
+        }
+
+        const char* strings = nullptr;
+        const ElfW(Sym)* symbols = nullptr;
+        const uint32_t* gnuHash = nullptr;
+        size_t symbolCount = 0;
+        for (auto entry = dynamic; entry->d_tag != DT_NULL; ++entry) {
+            if (entry->d_tag == DT_STRTAB) {
+                strings = reinterpret_cast<const char*>(entry->d_un.d_ptr);
+            } else if (entry->d_tag == DT_SYMTAB) {
+                symbols = reinterpret_cast<const ElfW(Sym)*>(entry->d_un.d_ptr);
+            } else if (entry->d_tag == DT_GNU_HASH) {
+                gnuHash = reinterpret_cast<const uint32_t*>(entry->d_un.d_ptr);
+            }
+        }
+        if (!strings || !symbols || !gnuHash) {
+            return 0;
+        }
+
+        // GNU hash layout: nbuckets, symoffset, bloom_size, bloom_shift,
+        // bloom filter, buckets, then symbol chains.
+        const auto bucketCount = gnuHash[0];
+        const auto symbolOffset = gnuHash[1];
+        const auto bloomSize = gnuHash[2];
+        const auto* buckets = gnuHash + 4 + bloomSize * (sizeof(ElfW(Addr)) / sizeof(uint32_t));
+        const auto* chains = buckets + bucketCount;
+        uint32_t lastSymbol = symbolOffset;
+        for (uint32_t bucket = 0; bucket < bucketCount; ++bucket) {
+            lastSymbol = std::max(lastSymbol, buckets[bucket]);
+        }
+        if (lastSymbol >= symbolOffset) {
+            uint32_t symbol = lastSymbol;
+            while ((chains[symbol - symbolOffset] & 1u) == 0) {
+                ++symbol;
+            }
+            symbolCount = static_cast<size_t>(symbol) + 1;
+        }
+
+        for (size_t i = 0; i < symbolCount; ++i) {
+            const auto& symbol = symbols[i];
+            if (symbol.st_shndx == SHN_UNDEF || symbol.st_value == 0) {
+                continue;
+            }
+            int status = 0;
+            char* demangled = abi::__cxa_demangle(strings + symbol.st_name, nullptr, nullptr, &status);
+            const bool match = status == 0 && demangled && std::strcmp(demangled, search->wanted) == 0;
+            std::free(demangled);
+            if (match) {
+                search->address = reinterpret_cast<void*>(info->dlpi_addr + symbol.st_value);
+                return 1;
+            }
+        }
+        return 0;
+    }
+
+    template <typename T> T resolveQt(const char* demangled)
+    {
+        SymbolSearch search{demangled};
+        dl_iterate_phdr(findQtSymbol, &search);
+        return reinterpret_cast<T>(search.address);
     }
 
     bool isNotify(const QDBusMessage& message)
@@ -183,7 +265,7 @@ namespace
 
 bool connectEis(const QDBusConnection& connection, const QString& session)
 {
-    auto call = resolve<BlockingCall>("_ZNK15QDBusConnection4callERK12QDBusMessageN5QDBus8CallModeEi");
+    auto call = resolveQt<BlockingCall>("QDBusConnection::call(QDBusMessage const&, QDBus::CallMode, int) const");
     if (!call) {
         log("QtDBus call symbol is unavailable");
         return false;
@@ -474,7 +556,7 @@ QDBusPendingCall QDBusConnection::asyncCall(const QDBusMessage& message, int tim
     if (intercept(*this, message)) {
         return QDBusPendingCall::fromCompletedCall(message.createReply());
     }
-    static auto real = resolve<AsyncCall>("_ZNK15QDBusConnection9asyncCallERK12QDBusMessagei");
+    static auto real = resolveQt<AsyncCall>("QDBusConnection::asyncCall(QDBusMessage const&, int) const");
     return real
                ? real(this, message, timeout)
                : QDBusPendingCall::fromError(QDBusError(QDBusError::InternalError, QStringLiteral("hook unavailable")));
@@ -495,8 +577,8 @@ QDBusPendingCall QDBusAbstractInterface::asyncCallWithArgumentList(const QString
         return QDBusPendingCall::fromCompletedCall(message.createReply());
     }
 
-    static auto real = resolve<AbstractAsyncCall>(
-        "_ZN22QDBusAbstractInterface25asyncCallWithArgumentListERK7QStringRK5QListI8QVariantE");
+    static auto real = resolveQt<AbstractAsyncCall>(
+        "QDBusAbstractInterface::asyncCallWithArgumentList(QString const&, QList<QVariant> const&)");
     return real
                ? real(this, method, args)
                : QDBusPendingCall::fromError(QDBusError(QDBusError::InternalError, QStringLiteral("hook unavailable")));
@@ -507,6 +589,6 @@ QDBusMessage QDBusConnection::call(const QDBusMessage& message, QDBus::CallMode 
     if (intercept(*this, message)) {
         return message.createReply();
     }
-    static auto real = resolve<BlockingCall>("_ZNK15QDBusConnection4callERK12QDBusMessageN5QDBus8CallModeEi");
+    static auto real = resolveQt<BlockingCall>("QDBusConnection::call(QDBusMessage const&, QDBus::CallMode, int) const");
     return real ? real(this, message, mode, timeout) : QDBusMessage::createError(QDBusError::InternalError, {});
 }
