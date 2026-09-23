@@ -27,6 +27,10 @@ KEEPASSXC_LIBEI_DEBUG=1 \
   LD_PRELOAD=/tmp/keepassxc-libei-build/libkeepassxc-libei.so keepassxc
 ```
 
+Before each detected auto-type sequence, the backend runs
+`fcitx5-remote -c`. A new sequence is detected after 1 second without input;
+adjust this with `KEEPASSXC_LIBEI_INPUT_METHOD_REARM_GAP_MS`.
+
 KeePassXC normally runs as a single instance. Close every existing KeePassXC
 process before starting it with `LD_PRELOAD`; otherwise the new process only
 forwards the request to the old process, which does not contain this library.
