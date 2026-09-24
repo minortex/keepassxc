@@ -9,6 +9,12 @@ QtDBus resolves generated-interface calls inside its own library.
 The original QtDBus functions are located at runtime by their demangled C++
 signatures instead of hard-coded mangled names.
 
+When the compositor advertises an EIS text device (libei 1.6 or newer), the
+backend sends printable Unicode keysyms as UTF-8 text. This allows characters
+that are absent from the active keyboard layout to be typed. If no text device
+is provided, it retains the keyboard keycode path. Shortcut chords continue to
+use key events.
+
 Build it with:
 
 ```sh

@@ -42,8 +42,10 @@ namespace
         std::mutex mutex;
         struct ei* context = nullptr;
         struct ei_device* device = nullptr;
+        struct ei_device* textDevice = nullptr;
         QString session;
         uint32_t sequence = 1;
+        uint32_t heldModifiers = 0;
         xkb_keymap* keymap = nullptr;
         int keymapFd = -1;
         void* keymapData = nullptr;
@@ -185,6 +187,11 @@ namespace
             ei_device_unref(state.device);
             state.device = nullptr;
         }
+        if (state.textDevice) {
+            ei_device_stop_emulating(state.textDevice);
+            ei_device_unref(state.textDevice);
+            state.textDevice = nullptr;
+        }
         if (state.keymap) {
             xkb_keymap_unref(state.keymap);
             state.keymap = nullptr;
@@ -208,6 +215,7 @@ namespace
             state.context = nullptr;
         }
         state.session.clear();
+        state.heldModifiers = 0;
     }
 
     bool waitForDevice()
@@ -217,9 +225,10 @@ namespace
             return false;
         }
 
-        for (int attempt = 0; attempt < 100 && !state.device; ++attempt) {
+        for (int attempt = 0; attempt < 100 && (!state.device || !state.textDevice); ++attempt) {
             pollfd pollFd{fd, POLLIN, 0};
-            if (poll(&pollFd, 1, 100) < 0 && errno != EINTR) {
+            const int pollResult = poll(&pollFd, 1, 100);
+            if (pollResult < 0 && errno != EINTR) {
                 return false;
             }
             ei_dispatch(state.context);
@@ -227,12 +236,17 @@ namespace
                 const auto type = ei_event_get_type(event);
                 if (type == EI_EVENT_SEAT_ADDED) {
                     if (auto* seat = ei_event_get_seat(event)) {
-                        ei_seat_bind_capabilities(seat, EI_DEVICE_CAP_KEYBOARD, nullptr);
+                        ei_seat_bind_capabilities(seat, EI_DEVICE_CAP_KEYBOARD, EI_DEVICE_CAP_TEXT, nullptr);
                     }
                 } else if (type == EI_EVENT_DEVICE_ADDED) {
                     auto* device = ei_event_get_device(event);
-                    if (device && ei_device_has_capability(device, EI_DEVICE_CAP_KEYBOARD)) {
+                    if (device && ei_device_has_capability(device, EI_DEVICE_CAP_TEXT) && !state.textDevice) {
+                        state.textDevice = ei_device_ref(device);
+                        log("compositor provided an EIS text device");
+                    }
+                    if (device && ei_device_has_capability(device, EI_DEVICE_CAP_KEYBOARD) && !state.device) {
                         state.device = ei_device_ref(device);
+                        log("compositor provided an EIS keyboard device");
                         auto* keymap = ei_device_keyboard_get_keymap(state.device);
                         if (keymap) {
                             state.keymapFd = dup(ei_keymap_get_fd(keymap));
@@ -251,15 +265,26 @@ namespace
                             }
                         }
                     }
-                } else if (type == EI_EVENT_DEVICE_RESUMED && ei_event_get_device(event) == state.device) {
-                    ei_device_start_emulating(state.device, state.sequence++);
+                } else if (type == EI_EVENT_DEVICE_RESUMED) {
+                    auto* resumed = ei_event_get_device(event);
+                    if (resumed == state.device || resumed == state.textDevice) {
+                        ei_device_start_emulating(resumed, state.sequence++);
+                    }
                 } else if (type == EI_EVENT_DISCONNECT) {
                     ei_event_unref(event);
                     return false;
                 }
                 ei_event_unref(event);
             }
+            // The keyboard device is mandatory; some compositors do not yet
+            // expose the optional text device. Give the compositor one idle
+            // round trip to announce it, then continue with keyboard events.
+            if (state.device && !state.textDevice && pollResult == 0) {
+                break;
+            }
         }
+        // Text devices are optional in older compositors. Keep the keyboard
+        // path usable when KWin does not advertise EI_DEVICE_CAP_TEXT.
         return state.device != nullptr;
     }
 
@@ -509,6 +534,44 @@ void prepareInputMethod()
         if (const auto keycode = modifierKeycode(keysym)) {
             ei_device_keyboard_key(state.device, keycode, pressed);
             ei_device_frame(state.device, ei_now(state.context));
+            uint32_t bit = 0;
+            switch (keysym) {
+            case XKB_KEY_Control_L:
+            case XKB_KEY_Control_R:
+                bit = 1;
+                break;
+            case XKB_KEY_Alt_L:
+            case XKB_KEY_Alt_R:
+            case XKB_KEY_Meta_L:
+            case XKB_KEY_Meta_R:
+                bit = 2;
+                break;
+            case XKB_KEY_Shift_L:
+            case XKB_KEY_Shift_R:
+                bit = 4;
+                break;
+            default:
+                break;
+            }
+            if (pressed) {
+                state.heldModifiers |= bit;
+            } else {
+                state.heldModifiers &= ~bit;
+            }
+            return true;
+        }
+
+        // EIS text devices accept Unicode independently of the active keyboard
+        // layout. Use them for printable characters when no shortcut modifier
+        // is held; keep key events for shortcuts and non-text keys.
+        const auto unicode = xkb_keysym_to_utf32(keysym);
+        if (state.textDevice && unicode >= 0x20 && unicode != 0x7f && !(state.heldModifiers & 3)) {
+            if (pressed) {
+                const char32_t codepoints[] = {static_cast<char32_t>(unicode)};
+                const auto utf8 = QString::fromUcs4(codepoints, 1).toUtf8();
+                ei_device_text_utf8_with_length(state.textDevice, utf8.constData(), utf8.size());
+                ei_device_frame(state.textDevice, ei_now(state.context));
+            }
             return true;
         }
 

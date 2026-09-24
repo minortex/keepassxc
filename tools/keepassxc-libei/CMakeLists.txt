@@ -3,7 +3,7 @@ project(keepassxc_libei LANGUAGES CXX)
 
 find_package(PkgConfig REQUIRED)
 find_package(Qt6 REQUIRED COMPONENTS Core DBus)
-pkg_check_modules(LIBEI REQUIRED IMPORTED_TARGET libei-1.0)
+pkg_check_modules(LIBEI REQUIRED IMPORTED_TARGET libei-1.0>=1.6)
 pkg_check_modules(XKBCOMMON REQUIRED IMPORTED_TARGET xkbcommon)
 
 add_library(keepassxc-libei SHARED keepassxc-libei.cpp)
