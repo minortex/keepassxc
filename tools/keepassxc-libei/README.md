@@ -22,6 +22,20 @@ cmake -S tools/keepassxc-libei -B /tmp/keepassxc-libei-build
 cmake --build /tmp/keepassxc-libei-build
 ```
 
+To exercise the portal and the preload hook without KeePassXC, run the test
+sender with the same preload library:
+
+```sh
+KEEPASSXC_LIBEI_DEBUG=1 \
+  LD_PRELOAD=/tmp/keepassxc-libei-build/libkeepassxc-libei.so \
+  /tmp/keepassxc-libei-build/keepassxc-libei-test-autotype 'î¾ÙÇÕÁ'
+```
+
+Approve the RemoteDesktop request if prompted, then focus the target text field
+within the 3-second countdown. The test sends each character through
+`NotifyKeyboardKeysym`, so the preload hook follows the same interception and
+EIS path as KeePassXC auto-type.
+
 Start KeePassXC with:
 
 ```sh

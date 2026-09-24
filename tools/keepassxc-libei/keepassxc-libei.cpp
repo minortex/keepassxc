@@ -234,12 +234,27 @@ namespace
             ei_dispatch(state.context);
             while (auto* event = ei_get_event(state.context)) {
                 const auto type = ei_event_get_type(event);
+                if (std::getenv("KEEPASSXC_LIBEI_DEBUG")) {
+                    std::fprintf(stderr, "keepassxc-libei: EIS event %s\n", ei_event_type_to_string(type));
+                }
                 if (type == EI_EVENT_SEAT_ADDED) {
                     if (auto* seat = ei_event_get_seat(event)) {
+                        if (std::getenv("KEEPASSXC_LIBEI_DEBUG")) {
+                            std::fprintf(stderr,
+                                         "keepassxc-libei: EIS seat capabilities keyboard=%d text=%d\n",
+                                         ei_seat_has_capability(seat, EI_DEVICE_CAP_KEYBOARD),
+                                         ei_seat_has_capability(seat, EI_DEVICE_CAP_TEXT));
+                        }
                         ei_seat_bind_capabilities(seat, EI_DEVICE_CAP_KEYBOARD, EI_DEVICE_CAP_TEXT, nullptr);
                     }
                 } else if (type == EI_EVENT_DEVICE_ADDED) {
                     auto* device = ei_event_get_device(event);
+                    if (device && std::getenv("KEEPASSXC_LIBEI_DEBUG")) {
+                        std::fprintf(stderr,
+                                     "keepassxc-libei: EIS device keyboard=%d text=%d\n",
+                                     ei_device_has_capability(device, EI_DEVICE_CAP_KEYBOARD),
+                                     ei_device_has_capability(device, EI_DEVICE_CAP_TEXT));
+                    }
                     if (device && ei_device_has_capability(device, EI_DEVICE_CAP_TEXT) && !state.textDevice) {
                         state.textDevice = ei_device_ref(device);
                         log("compositor provided an EIS text device");
@@ -317,6 +332,9 @@ bool connectEis(const QDBusConnection& connection, const QString& session)
             return false;
         }
 
+        // ConnectToEIS is one-shot per portal session, even if libei setup
+        // fails afterward. Remember the session so callers do not reconnect.
+        state.session = session;
         const auto descriptor = reply.arguments().first().value<QDBusUnixFileDescriptor>();
         if (!descriptor.isValid()) {
             log("ConnectToEIS returned an invalid file descriptor");
@@ -330,18 +348,31 @@ bool connectEis(const QDBusConnection& connection, const QString& session)
         }
         ei_configure_name(state.context, "KeePassXC auto-type");
         const int fd = dup(descriptor.fileDescriptor());
-        if (fd < 0 || ei_setup_backend_fd(state.context, fd) < 0 || !waitForDevice()) {
-            log("failed to initialize libei backend or keyboard device");
+        if (fd < 0) {
+            log("failed to duplicate the EIS file descriptor");
             reset();
+            state.session = session;
             return false;
         }
-        state.session = session;
+        const int setupResult = ei_setup_backend_fd(state.context, fd);
+        if (setupResult < 0) {
+            log("ei_setup_backend_fd failed");
+            reset();
+            state.session = session;
+            return false;
+        }
+        if (!waitForDevice()) {
+            log("no EIS keyboard device arrived before timeout or disconnect");
+            reset();
+            state.session = session;
+            return false;
+        }
     return true;
 }
 
 void prepareInputMethod()
 {
-    const auto result = std::system("fcitx5-remote -c");
+    const auto result = std::system("env -u LD_PRELOAD fcitx5-remote -c");
     if (result != 0) {
         log("fcitx5-remote -c failed");
     } else {
@@ -520,14 +551,14 @@ void prepareInputMethod()
     state.lastInput = now;
     state.hasInput = true;
 
-    if (state.session != session) {
+        if (state.session != session) {
             reset();
             if (!connectEis(connection, session)) {
                 return false;
             }
         }
         if (!state.device) {
-            log("libei keyboard device is not available");
+            log("EIS setup already failed for this portal session; cannot retry ConnectToEIS");
             return false;
         }
 
@@ -606,9 +637,9 @@ void prepareInputMethod()
             return false;
         }
 
-        // Once the EIS backend is selected, never send the same event through the
-        // portal's keysym API as a fallback. Doing so can duplicate input or
-        // violate the portal's exclusive EIS input flow.
+        // Once EIS is selected, consume the portal call even when setup or
+        // translation fails. Retrying through the portal can duplicate input
+        // or violate the session's EIS connection state.
         sendKey(connection, message);
         return true;
     }
