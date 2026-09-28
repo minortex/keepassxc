@@ -43,6 +43,8 @@ namespace
         struct ei* context = nullptr;
         struct ei_device* device = nullptr;
         struct ei_device* textDevice = nullptr;
+        bool deviceEmulating = false;
+        bool textDeviceEmulating = false;
         QString session;
         uint32_t sequence = 1;
         uint32_t heldModifiers = 0;
@@ -182,16 +184,23 @@ namespace
 
     void resetDevice()
     {
+        const bool sameDevice = state.device && state.device == state.textDevice;
         if (state.device) {
-            ei_device_stop_emulating(state.device);
+            if (state.deviceEmulating) {
+                ei_device_stop_emulating(state.device);
+            }
             ei_device_unref(state.device);
             state.device = nullptr;
         }
         if (state.textDevice) {
-            ei_device_stop_emulating(state.textDevice);
+            if (state.textDeviceEmulating && !sameDevice) {
+                ei_device_stop_emulating(state.textDevice);
+            }
             ei_device_unref(state.textDevice);
             state.textDevice = nullptr;
         }
+        state.deviceEmulating = false;
+        state.textDeviceEmulating = false;
         if (state.keymap) {
             xkb_keymap_unref(state.keymap);
             state.keymap = nullptr;
@@ -225,7 +234,13 @@ namespace
             return false;
         }
 
-        for (int attempt = 0; attempt < 100 && (!state.device || !state.textDevice); ++attempt) {
+        for (int attempt = 0; attempt < 100; ++attempt) {
+            const bool keyboardReady = state.device && state.deviceEmulating;
+            const bool textReady = !state.textDevice || state.textDeviceEmulating;
+            if (keyboardReady && state.textDevice && textReady) {
+                break;
+            }
+
             pollfd pollFd{fd, POLLIN, 0};
             const int pollResult = poll(&pollFd, 1, 100);
             if (pollResult < 0 && errno != EINTR) {
@@ -282,8 +297,37 @@ namespace
                     }
                 } else if (type == EI_EVENT_DEVICE_RESUMED) {
                     auto* resumed = ei_event_get_device(event);
-                    if (resumed == state.device || resumed == state.textDevice) {
+                    bool started = false;
+                    if (resumed == state.device && !state.deviceEmulating) {
                         ei_device_start_emulating(resumed, state.sequence++);
+                        state.deviceEmulating = true;
+                        started = true;
+                    }
+                    if (resumed == state.textDevice && !state.textDeviceEmulating) {
+                        if (!started) {
+                            ei_device_start_emulating(resumed, state.sequence++);
+                        }
+                        state.textDeviceEmulating = true;
+                    }
+                } else if (type == EI_EVENT_DEVICE_PAUSED) {
+                    auto* paused = ei_event_get_device(event);
+                    if (paused == state.device) {
+                        state.deviceEmulating = false;
+                    }
+                    if (paused == state.textDevice) {
+                        state.textDeviceEmulating = false;
+                    }
+                } else if (type == EI_EVENT_DEVICE_REMOVED) {
+                    auto* removed = ei_event_get_device(event);
+                    if (removed == state.device) {
+                        ei_device_unref(state.device);
+                        state.device = nullptr;
+                        state.deviceEmulating = false;
+                    }
+                    if (removed == state.textDevice) {
+                        ei_device_unref(state.textDevice);
+                        state.textDevice = nullptr;
+                        state.textDeviceEmulating = false;
                     }
                 } else if (type == EI_EVENT_DISCONNECT) {
                     ei_event_unref(event);
@@ -294,13 +338,13 @@ namespace
             // The keyboard device is mandatory; some compositors do not yet
             // expose the optional text device. Give the compositor one idle
             // round trip to announce it, then continue with keyboard events.
-            if (state.device && !state.textDevice && pollResult == 0) {
+            if (state.device && state.deviceEmulating && !state.textDevice && pollResult == 0) {
                 break;
             }
         }
         // Text devices are optional in older compositors. Keep the keyboard
         // path usable when KWin does not advertise EI_DEVICE_CAP_TEXT.
-        return state.device != nullptr;
+        return state.device && state.deviceEmulating;
     }
 
 bool connectEis(const QDBusConnection& connection, const QString& session)
@@ -557,7 +601,7 @@ void prepareInputMethod()
                 return false;
             }
         }
-        if (!state.device) {
+        if (!state.device || !state.deviceEmulating) {
             log("EIS setup already failed for this portal session; cannot retry ConnectToEIS");
             return false;
         }
@@ -596,7 +640,8 @@ void prepareInputMethod()
         // layout. Use them for printable characters when no shortcut modifier
         // is held; keep key events for shortcuts and non-text keys.
         const auto unicode = xkb_keysym_to_utf32(keysym);
-        if (state.textDevice && unicode >= 0x20 && unicode != 0x7f && !(state.heldModifiers & 3)) {
+        if (state.textDevice && state.textDeviceEmulating && unicode >= 0x20 && unicode != 0x7f
+            && !(state.heldModifiers & 3)) {
             if (pressed) {
                 const char32_t codepoints[] = {static_cast<char32_t>(unicode)};
                 const auto utf8 = QString::fromUcs4(codepoints, 1).toUtf8();
