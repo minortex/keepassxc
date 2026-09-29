@@ -564,7 +564,7 @@ void prepareInputMethod()
         return result;
     }
 
-    bool sendKey(const QDBusConnection& connection, const QDBusMessage& message)
+    bool sendKey(const QDBusConnection& connection, const QDBusMessage& message, QString& error)
     {
         const auto args = message.arguments();
         const auto sessionObject = args.at(0).value<QDBusObjectPath>();
@@ -572,7 +572,17 @@ void prepareInputMethod()
         const auto keysym = args.at(2).toUInt();
         const auto pressed = args.at(3).toUInt() != 0;
 
+        if (std::getenv("KEEPASSXC_LIBEI_DEBUG")) {
+            const auto sessionUtf8 = session.toUtf8();
+            std::fprintf(stderr,
+                         "keepassxc-libei: NotifyKeyboardKeysym session=%s keysym=0x%x pressed=%d\n",
+                         sessionUtf8.constData(),
+                         keysym,
+                         pressed);
+        }
+
         if (session.isEmpty()) {
+            error = QStringLiteral("NotifyKeyboardKeysym has an invalid session path");
             log("NotifyKeyboardKeysym has an invalid session path");
             return false;
     }
@@ -598,15 +608,23 @@ void prepareInputMethod()
         if (state.session != session) {
             reset();
             if (!connectEis(connection, session)) {
+                error = QStringLiteral("ConnectToEIS failed for portal session %1").arg(session);
                 return false;
             }
         }
         if (!state.device || !state.deviceEmulating) {
+            error = QStringLiteral("EIS keyboard device is not available for portal session %1").arg(session);
             log("EIS setup already failed for this portal session; cannot retry ConnectToEIS");
             return false;
         }
 
         if (const auto keycode = modifierKeycode(keysym)) {
+            if (std::getenv("KEEPASSXC_LIBEI_DEBUG")) {
+                std::fprintf(stderr,
+                             "keepassxc-libei: keyboard key keycode=%u pressed=%d source=modifier\n",
+                             keycode,
+                             pressed);
+            }
             ei_device_keyboard_key(state.device, keycode, pressed);
             ei_device_frame(state.device, ei_now(state.context));
             uint32_t bit = 0;
@@ -653,10 +671,21 @@ void prepareInputMethod()
 
         const auto keycode = findKeycode(keysym);
         if (!keycode) {
+            error = QStringLiteral("Keysym 0x%1 is not present in the EIS keyboard keymap").arg(keysym, 0, 16);
             log("keysym is absent from the portal keymap");
             return false;
         }
         const auto modifiers = findRequiredModifiers(keysym);
+        if (std::getenv("KEEPASSXC_LIBEI_DEBUG")) {
+            std::fprintf(stderr,
+                         "keepassxc-libei: keyboard key keycode=%u pressed=%d modifiers=",
+                         keycode,
+                         pressed);
+            for (const auto modifier : modifiers) {
+                std::fprintf(stderr, "%u,", modifier);
+            }
+            std::fprintf(stderr, "\n");
+        }
         if (pressed) {
             for (const auto modifier : modifiers) {
                 ei_device_keyboard_key(state.device, modifier, true);
@@ -676,7 +705,7 @@ void prepareInputMethod()
         return true;
     }
 
-    bool intercept(const QDBusConnection& connection, const QDBusMessage& message)
+    bool intercept(const QDBusConnection& connection, const QDBusMessage& message, QDBusMessage& reply)
     {
         if (!isNotify(message)) {
             return false;
@@ -685,15 +714,21 @@ void prepareInputMethod()
         // Once EIS is selected, consume the portal call even when setup or
         // translation fails. Retrying through the portal can duplicate input
         // or violate the session's EIS connection state.
-        sendKey(connection, message);
+        QString error;
+        if (sendKey(connection, message, error)) {
+            reply = message.createReply();
+        } else {
+            reply = message.createErrorReply(QDBusError::Failed, error);
+        }
         return true;
     }
 } // namespace
 
 QDBusPendingCall QDBusConnection::asyncCall(const QDBusMessage& message, int timeout) const
 {
-    if (intercept(*this, message)) {
-        return QDBusPendingCall::fromCompletedCall(message.createReply());
+    QDBusMessage reply;
+    if (intercept(*this, message, reply)) {
+        return QDBusPendingCall::fromCompletedCall(reply);
     }
     static auto real = resolveQt<AsyncCall>("QDBusConnection::asyncCall(QDBusMessage const&, int) const");
     return real
@@ -711,9 +746,10 @@ QDBusPendingCall QDBusAbstractInterface::asyncCallWithArgumentList(const QString
         message << arg;
     }
 
-    if (intercept(connection(), message)) {
+    QDBusMessage reply;
+    if (intercept(connection(), message, reply)) {
         log("consumed NotifyKeyboardKeysym");
-        return QDBusPendingCall::fromCompletedCall(message.createReply());
+        return QDBusPendingCall::fromCompletedCall(reply);
     }
 
     static auto real = resolveQt<AbstractAsyncCall>(
@@ -725,8 +761,9 @@ QDBusPendingCall QDBusAbstractInterface::asyncCallWithArgumentList(const QString
 
 QDBusMessage QDBusConnection::call(const QDBusMessage& message, QDBus::CallMode mode, int timeout) const
 {
-    if (intercept(*this, message)) {
-        return message.createReply();
+    QDBusMessage reply;
+    if (intercept(*this, message, reply)) {
+        return reply;
     }
     static auto real = resolveQt<BlockingCall>("QDBusConnection::call(QDBusMessage const&, QDBus::CallMode, int) const");
     return real ? real(this, message, mode, timeout) : QDBusMessage::createError(QDBusError::InternalError, {});
