@@ -9,6 +9,9 @@
 #include <libei.h>
 #include <xkbcommon/xkbcommon.h>
 
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+
 #include <dlfcn.h>
 #include <elf.h>
 #include <link.h>
@@ -37,6 +40,16 @@ namespace
     constexpr auto portalInterface = "org.freedesktop.portal.RemoteDesktop";
     constexpr auto keyMethod = "NotifyKeyboardKeysym";
 
+    // Whether the window that will receive the injected text is a native
+    // Wayland client or an X11/XWayland client. The two need different
+    // delivery: Wayland accepts EIS UTF-8 text, X11 only understands keycodes.
+    enum class TargetKind
+    {
+        Unknown,
+        Wayland,
+        X11,
+    };
+
     struct State
     {
         std::mutex mutex;
@@ -45,6 +58,7 @@ namespace
         struct ei_device* textDevice = nullptr;
         bool deviceEmulating = false;
         bool textDeviceEmulating = false;
+        TargetKind targetKind = TargetKind::Unknown;
         QString session;
         uint32_t sequence = 1;
         uint32_t heldModifiers = 0;
@@ -225,6 +239,7 @@ namespace
         }
         state.session.clear();
         state.heldModifiers = 0;
+        state.targetKind = TargetKind::Unknown;
     }
 
     bool waitForDevice()
@@ -416,6 +431,9 @@ bool connectEis(const QDBusConnection& connection, const QString& session)
 
 void prepareInputMethod()
 {
+    if (std::getenv("KEEPASSXC_LIBEI_KEEP_INPUT_METHOD")) {
+        return;
+    }
     const auto result = std::system("env -u LD_PRELOAD fcitx5-remote -c");
     if (result != 0) {
         log("fcitx5-remote -c failed");
@@ -423,6 +441,59 @@ void prepareInputMethod()
         log("input method disabled");
     }
 }
+
+    // XWayland keeps X input focus on a 1x1 dummy window (position -1,-1, no
+    // WM_CLASS) whenever a native Wayland surface holds keyboard focus. When an
+    // X11 client is focused, XGetInputFocus returns that real window instead.
+    // That difference is how we tell the two apart without any compositor API.
+    TargetKind detectTargetKind()
+    {
+        const char* displayName = std::getenv("DISPLAY");
+        if (!displayName || !*displayName) {
+            return TargetKind::Wayland;
+        }
+
+        Display* display = XOpenDisplay(displayName);
+        if (!display) {
+            log("could not open the X display to detect the target window");
+            return TargetKind::Unknown;
+        }
+
+        Window focus = None;
+        int revert = 0;
+        XGetInputFocus(display, &focus, &revert);
+
+        TargetKind kind = TargetKind::Unknown;
+        if (focus == None || focus == PointerRoot || focus == InputFocus) {
+            kind = TargetKind::Wayland;
+        } else {
+            XWindowAttributes attributes{};
+            const bool hasAttributes = XGetWindowAttributes(display, focus, &attributes) != 0;
+            XClassHint classHint{};
+            const bool hasClass = XGetClassHint(display, focus, &classHint) != 0;
+            if (hasClass) {
+                if (classHint.res_name) {
+                    XFree(classHint.res_name);
+                }
+                if (classHint.res_class) {
+                    XFree(classHint.res_class);
+                }
+            }
+            if (!hasAttributes) {
+                kind = TargetKind::Wayland;
+            } else if (hasClass) {
+                kind = TargetKind::X11;
+            } else if (attributes.width <= 1 && attributes.height <= 1) {
+                // The XWayland focus proxy: a tiny unmanaged window.
+                kind = TargetKind::Wayland;
+            } else {
+                kind = TargetKind::X11;
+            }
+        }
+
+        XCloseDisplay(display);
+        return kind;
+    }
 
     uint32_t findKeycode(uint32_t keysym)
     {
@@ -599,8 +670,12 @@ void prepareInputMethod()
     const auto now = std::chrono::steady_clock::now();
     const auto newInput = !state.hasInput
         || std::chrono::duration_cast<std::chrono::milliseconds>(now - state.lastInput).count() >= rearmGapMs;
+    TargetKind sampledKind = TargetKind::Unknown;
     if (newInput) {
-        prepareInputMethod();
+        // Sample the focused window once per auto-type sequence. The main
+        // window is already hidden by the time the first keysym arrives, so the
+        // focus has settled on the target application.
+        sampledKind = detectTargetKind();
     }
     state.lastInput = now;
     state.hasInput = true;
@@ -611,6 +686,25 @@ void prepareInputMethod()
                 error = QStringLiteral("ConnectToEIS failed for portal session %1").arg(session);
                 return false;
             }
+        }
+        if (newInput) {
+            state.targetKind = sampledKind;
+        }
+        // A native Wayland client receives EIS UTF-8 text directly, so the
+        // input method must stay out of the way. An X11 client only understands
+        // keycodes, so disable the input method there to avoid it swallowing
+        // the injected keys.
+        if (newInput && state.targetKind != TargetKind::Wayland) {
+            prepareInputMethod();
+        }
+
+        if (std::getenv("KEEPASSXC_LIBEI_DEBUG")) {
+            std::fprintf(stderr,
+                         "keepassxc-libei: target kind=%s%s\n",
+                         state.targetKind == TargetKind::Wayland ? "wayland"
+                             : state.targetKind == TargetKind::X11 ? "x11"
+                                                                   : "unknown",
+                         newInput ? " (sampled)" : " (cached)");
         }
         if (!state.device || !state.deviceEmulating) {
             error = QStringLiteral("EIS keyboard device is not available for portal session %1").arg(session);
@@ -658,11 +752,20 @@ void prepareInputMethod()
         // layout. Use them for printable characters when no shortcut modifier
         // is held; keep key events for shortcuts and non-text keys.
         const auto unicode = xkb_keysym_to_utf32(keysym);
-        if (state.textDevice && state.textDeviceEmulating && unicode >= 0x20 && unicode != 0x7f
-            && !(state.heldModifiers & 3)) {
+        // X11/XWayland clients cannot consume EIS text: the compositor has to
+        // translate it back into keycodes, which drops anything outside the
+        // active keymap. Send text only to native Wayland targets.
+        if (state.targetKind == TargetKind::Wayland && state.textDevice && state.textDeviceEmulating
+            && unicode >= 0x20 && unicode != 0x7f && !(state.heldModifiers & 3)) {
             if (pressed) {
                 const char32_t codepoints[] = {static_cast<char32_t>(unicode)};
                 const auto utf8 = QString::fromUcs4(codepoints, 1).toUtf8();
+                if (std::getenv("KEEPASSXC_LIBEI_DEBUG")) {
+                    std::fprintf(stderr,
+                                 "keepassxc-libei: text utf8=\"%s\" codepoint=U+%04X\n",
+                                 utf8.constData(),
+                                 unicode);
+                }
                 ei_device_text_utf8_with_length(state.textDevice, utf8.constData(), utf8.size());
                 ei_device_frame(state.textDevice, ei_now(state.context));
             }

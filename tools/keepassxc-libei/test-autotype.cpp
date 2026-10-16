@@ -9,6 +9,8 @@
 #include <QThread>
 #include <QVariantMap>
 
+#include <cstdlib>
+
 #include <xkbcommon/xkbcommon.h>
 
 namespace
@@ -165,9 +167,17 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    QTextStream(stdout) << "Portal session is ready. Focus the target text field; typing starts in 3 seconds."
-                        << Qt::endl;
-    QThread::sleep(3);
+    unsigned delayMs = 3000;
+    if (const auto* value = std::getenv("KEEPASSXC_LIBEI_TEST_DELAY_MS")) {
+        char* end = nullptr;
+        const auto parsed = std::strtoul(value, &end, 10);
+        if (end != value && *end == '\0') {
+            delayMs = static_cast<unsigned>(parsed);
+        }
+    }
+    QTextStream(stdout) << "Portal session is ready. Focus the target text field; typing starts in "
+                        << (delayMs / 1000.0) << " seconds." << Qt::endl;
+    QThread::msleep(delayMs);
 
     for (const auto codepoint : codepoints) {
         const auto keysym = xkb_utf32_to_keysym(codepoint);
