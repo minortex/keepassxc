@@ -22,7 +22,13 @@ input method is left untouched. Shortcut chords still use key events.
 
 For an **X11/XWayland** target the backend keeps the keyboard keycode path and
 disables the input method with `fcitx5-remote -c` before injecting, so the input
-method does not swallow the injected keys.
+method does not swallow the injected keys. Instead of the EIS keyboard device it
+injects through XTEST on the `DISPLAY` connection: keysyms already present in
+the X keymap are sent as their real keycode (with a synthesized Shift when the
+keysym lives on the shifted level), and any other keysym is delivered by
+temporarily binding a spare keycode to it, tapping it, then unbinding. Unlike
+the compositor's EIS text path the X keymap remap is synchronous, so non-ASCII
+characters reach the X11 client intact.
 
 ## Target detection
 
@@ -39,16 +45,19 @@ settled on the target application.
 
 ## Known limitations
 
-- **X11 non-ASCII characters are dropped.** EIS text cannot reach an X11 client:
-  the compositor has to translate the text back into keycodes, and anything
-  outside the active keymap is lost. This is a KWin limitation in the
-  `forwardKeySym` fallback (temporary keymap around a scratch keycode), not a
-  bug in this hook. Toggling the input method does not change it.
+- **The input method cannot be bypassed on X11.** X11 clients receive only
+  keyboard events, and an input method (fcitx5) intercepts those before the
+  client sees them. XTEST injection is affected just like a physical key press,
+  so the input method has to be disabled for the sequence. This is why the
+  backend runs `fcitx5-remote -c` for X11 targets.
 - **A pending input method preedit is committed, not discarded.**
   `fcitx5-remote -c` deactivates the input method, and fcitx commits whatever is
   in the preedit at that moment. The committed text ends up in the target field
   before the injected text. There is no `fcitx5-remote` option to clear a
-  preedit.
+  preedit. On a native Wayland target the input method stays active and a live
+  preedit is interleaved with the injected text instead.
+- **X11 injection needs an XTEST-capable `DISPLAY`.** Without `DISPLAY` or the
+  XTEST extension the backend cannot deliver text to an X11 target.
 
 Build it with:
 

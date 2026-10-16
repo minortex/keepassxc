@@ -11,6 +11,9 @@
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <X11/XKBlib.h>
+#include <X11/extensions/XTest.h>
+#include <X11/keysym.h>
 
 #include <dlfcn.h>
 #include <elf.h>
@@ -59,6 +62,8 @@ namespace
         bool deviceEmulating = false;
         bool textDeviceEmulating = false;
         TargetKind targetKind = TargetKind::Unknown;
+        Display* x11Display = nullptr;
+        int x11SpareKeycode = 0;
         QString session;
         uint32_t sequence = 1;
         uint32_t heldModifiers = 0;
@@ -240,6 +245,11 @@ namespace
         state.session.clear();
         state.heldModifiers = 0;
         state.targetKind = TargetKind::Unknown;
+        if (state.x11Display) {
+            XCloseDisplay(state.x11Display);
+            state.x11Display = nullptr;
+        }
+        state.x11SpareKeycode = 0;
     }
 
     bool waitForDevice()
@@ -635,6 +645,172 @@ void prepareInputMethod()
         return result;
     }
 
+    // X11 clients only receive keyboard events, and the compositor's EIS text
+    // path loses anything outside the active keymap (see README). Bypass EIS
+    // entirely for X11 targets: temporarily bind a spare keycode to the target
+    // keysym, tap it with XTEST, then unbind. Unlike the compositor path the
+    // remap is synchronous, so non-ASCII characters arrive intact.
+    bool ensureX11Display()
+    {
+        if (state.x11Display) {
+            return true;
+        }
+        const char* displayName = std::getenv("DISPLAY");
+        if (!displayName || !*displayName) {
+            return false;
+        }
+        Display* display = XOpenDisplay(displayName);
+        if (!display) {
+            log("could not open the X display for XTEST injection");
+            return false;
+        }
+
+        // Find a keycode with no keysyms bound so remapping it is harmless.
+        // Prefer the highest codes: low codes map to reserved evdev codes that
+        // XWayland drops. X11 keycodes are evdev codes plus 8, so keep the
+        // spare above keycode 8 (evdev 0, KEY_RESERVED).
+        int minKeycode = 0;
+        int maxKeycode = 0;
+        int perKeycode = 0;
+        XDisplayKeycodes(display, &minKeycode, &maxKeycode);
+        KeySym* mapping = XGetKeyboardMapping(display, minKeycode, maxKeycode - minKeycode + 1, &perKeycode);
+        int spare = 0;
+        if (mapping) {
+            for (int code = maxKeycode; code > 8 && !spare; --code) {
+                bool used = false;
+                for (int i = 0; i < perKeycode; ++i) {
+                    if (mapping[(code - minKeycode) * perKeycode + i] != NoSymbol) {
+                        used = true;
+                        break;
+                    }
+                }
+                if (!used) {
+                    spare = code;
+                }
+            }
+            XFree(mapping);
+        }
+        if (!spare) {
+            log("no spare X11 keycode available for XTEST injection");
+            XCloseDisplay(display);
+            return false;
+        }
+
+        state.x11Display = display;
+        state.x11SpareKeycode = spare;
+        if (std::getenv("KEEPASSXC_LIBEI_DEBUG")) {
+            std::fprintf(stderr, "keepassxc-libei: XTEST spare keycode=%d\n", spare);
+        }
+        return true;
+    }
+
+    bool sendKeyX11(uint32_t keysym, bool pressed)
+    {
+        if (!ensureX11Display()) {
+            return false;
+        }
+        Display* display = state.x11Display;
+
+        if (const auto modifier = modifierKeycode(keysym)) {
+            // X keycodes are evdev codes plus 8; modifierKeycode returns evdev.
+            const KeyCode keycode = static_cast<KeyCode>(modifier + 8);
+            XTestFakeKeyEvent(display, keycode, pressed ? True : False, CurrentTime);
+            XFlush(display);
+            uint32_t bit = 0;
+            switch (keysym) {
+            case XKB_KEY_Control_L:
+            case XKB_KEY_Control_R:
+                bit = 1;
+                break;
+            case XKB_KEY_Alt_L:
+            case XKB_KEY_Alt_R:
+            case XKB_KEY_Meta_L:
+            case XKB_KEY_Meta_R:
+                bit = 2;
+                break;
+            case XKB_KEY_Shift_L:
+            case XKB_KEY_Shift_R:
+                bit = 4;
+                break;
+            default:
+                break;
+            }
+            if (pressed) {
+                state.heldModifiers |= bit;
+            } else {
+                state.heldModifiers &= ~bit;
+            }
+            return true;
+        }
+
+        // Bind the spare keycode to the target keysym for the duration of the
+        // tap. XSync makes the remap visible before the fake key event.
+        // The portal delivers a press and a release for every keysym; emit the
+        // single tap only on the press so the character is not duplicated.
+        if (!pressed) {
+            return true;
+        }
+        const KeySym sym = static_cast<KeySym>(keysym);
+
+        // If the keysym already exists in the keymap, use its real keycode and
+        // synthesize Shift for the shifted level. This keeps layout-aware
+        // characters (uppercase letters, shifted symbols) correct.
+        const KeyCode realKeycode = XKeysymToKeycode(display, sym);
+        bool needsShift = false;
+        bool foundReal = false;
+        if (realKeycode != 0) {
+            if (XkbKeycodeToKeysym(display, realKeycode, 0, 0) == sym) {
+                foundReal = true;
+            } else if (XkbKeycodeToKeysym(display, realKeycode, 0, 1) == sym) {
+                foundReal = true;
+                needsShift = true;
+            }
+        }
+
+        if (foundReal) {
+            const KeyCode shiftKeycode = needsShift ? XKeysymToKeycode(display, XK_Shift_L) : 0;
+            if (shiftKeycode) {
+                XTestFakeKeyEvent(display, shiftKeycode, True, CurrentTime);
+            }
+            XTestFakeKeyEvent(display, realKeycode, True, CurrentTime);
+            XTestFakeKeyEvent(display, realKeycode, False, CurrentTime);
+            if (shiftKeycode) {
+                XTestFakeKeyEvent(display, shiftKeycode, False, CurrentTime);
+            }
+            XSync(display, False);
+            if (std::getenv("KEEPASSXC_LIBEI_DEBUG")) {
+                std::fprintf(stderr,
+                             "keepassxc-libei: XTEST keysym=0x%x keycode=%d shift=%d\n",
+                             keysym,
+                             realKeycode,
+                             needsShift ? 1 : 0);
+            }
+            return true;
+        }
+
+        KeySym syms[1] = {sym};
+        XChangeKeyboardMapping(display, state.x11SpareKeycode, 1, syms, 1);
+        XSync(display, False);
+
+        XTestFakeKeyEvent(display, static_cast<KeyCode>(state.x11SpareKeycode), True, CurrentTime);
+        XSync(display, False);
+        XTestFakeKeyEvent(display, static_cast<KeyCode>(state.x11SpareKeycode), False, CurrentTime);
+        XSync(display, False);
+
+        // Give X clients a moment to refresh their cached keymap from the
+        // MappingNotify before the spare keycode is reverted. Without this the
+        // client may still translate with the previous mapping.
+        usleep(2000);
+        KeySym none[1] = {NoSymbol};
+        XChangeKeyboardMapping(display, state.x11SpareKeycode, 1, none, 1);
+        XSync(display, False);
+
+        if (std::getenv("KEEPASSXC_LIBEI_DEBUG")) {
+            std::fprintf(stderr, "keepassxc-libei: XTEST keysym=0x%x\n", keysym);
+        }
+        return true;
+    }
+
     bool sendKey(const QDBusConnection& connection, const QDBusMessage& message, QString& error)
     {
         const auto args = message.arguments();
@@ -670,7 +846,7 @@ void prepareInputMethod()
     const auto now = std::chrono::steady_clock::now();
     const auto newInput = !state.hasInput
         || std::chrono::duration_cast<std::chrono::milliseconds>(now - state.lastInput).count() >= rearmGapMs;
-    TargetKind sampledKind = TargetKind::Unknown;
+    TargetKind sampledKind = state.targetKind;
     if (newInput) {
         // Sample the focused window once per auto-type sequence. The main
         // window is already hidden by the time the first keysym arrives, so the
@@ -680,6 +856,33 @@ void prepareInputMethod()
     state.lastInput = now;
     state.hasInput = true;
 
+        if (std::getenv("KEEPASSXC_LIBEI_DEBUG")) {
+            std::fprintf(stderr,
+                         "keepassxc-libei: target kind=%s%s\n",
+                         sampledKind == TargetKind::Wayland ? "wayland"
+                             : sampledKind == TargetKind::X11 ? "x11"
+                                                              : "unknown",
+                         newInput ? " (sampled)" : " (cached)");
+        }
+
+        // X11/XWayland targets bypass EIS entirely: XTEST with a synchronous
+        // keycode remap delivers any keysym, which the compositor's EIS text
+        // path cannot (see README). The input method still intercepts the keys,
+        // so disable it for the sequence.
+        if (sampledKind == TargetKind::X11) {
+            state.targetKind = sampledKind;
+            if (newInput) {
+                prepareInputMethod();
+            }
+            if (!sendKeyX11(keysym, pressed)) {
+                error = QStringLiteral("XTEST injection failed for keysym 0x%1").arg(keysym, 0, 16);
+                return false;
+            }
+            return true;
+        }
+
+        // A native Wayland client receives EIS UTF-8 text directly, so the
+        // input method must stay out of the way.
         if (state.session != session) {
             reset();
             if (!connectEis(connection, session)) {
@@ -690,22 +893,7 @@ void prepareInputMethod()
         if (newInput) {
             state.targetKind = sampledKind;
         }
-        // A native Wayland client receives EIS UTF-8 text directly, so the
-        // input method must stay out of the way. An X11 client only understands
-        // keycodes, so disable the input method there to avoid it swallowing
-        // the injected keys.
-        if (newInput && state.targetKind != TargetKind::Wayland) {
-            prepareInputMethod();
-        }
 
-        if (std::getenv("KEEPASSXC_LIBEI_DEBUG")) {
-            std::fprintf(stderr,
-                         "keepassxc-libei: target kind=%s%s\n",
-                         state.targetKind == TargetKind::Wayland ? "wayland"
-                             : state.targetKind == TargetKind::X11 ? "x11"
-                                                                   : "unknown",
-                         newInput ? " (sampled)" : " (cached)");
-        }
         if (!state.device || !state.deviceEmulating) {
             error = QStringLiteral("EIS keyboard device is not available for portal session %1").arg(session);
             log("EIS setup already failed for this portal session; cannot retry ConnectToEIS");
