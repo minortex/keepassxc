@@ -47,6 +47,7 @@ namespace
     constexpr auto portalPath = "/org/freedesktop/portal/desktop";
     constexpr auto portalInterface = "org.freedesktop.portal.RemoteDesktop";
     constexpr auto keyMethod = "NotifyKeyboardKeysym";
+    constexpr auto disableTextEnv = "KEEPASSXC_LIBEI_DISABLE_TEXT";
 
     // Whether the window that will receive the injected text is a native
     // Wayland client or an X11/XWayland client. The two need different
@@ -79,6 +80,7 @@ namespace
         std::chrono::steady_clock::time_point lastInput;
         bool hasInput = false;
         bool notified = false;
+        bool inputMethodPrepared = false;
     };
 
     State state;
@@ -324,11 +326,12 @@ namespace
         if (fd < 0) {
             return false;
         }
+        const bool textEnabled = !std::getenv(disableTextEnv);
 
         for (int attempt = 0; attempt < 100; ++attempt) {
             const bool keyboardReady = state.device && state.deviceEmulating;
-            const bool textReady = !state.textDevice || state.textDeviceEmulating;
-            if (keyboardReady && state.textDevice && textReady) {
+            const bool textReady = !textEnabled || !state.textDevice || state.textDeviceEmulating;
+            if (keyboardReady && (!textEnabled || state.textDevice) && textReady) {
                 break;
             }
 
@@ -351,7 +354,12 @@ namespace
                                          ei_seat_has_capability(seat, EI_DEVICE_CAP_KEYBOARD),
                                          ei_seat_has_capability(seat, EI_DEVICE_CAP_TEXT));
                         }
-                        ei_seat_bind_capabilities(seat, EI_DEVICE_CAP_KEYBOARD, EI_DEVICE_CAP_TEXT, nullptr);
+                        if (textEnabled) {
+                            ei_seat_bind_capabilities(
+                                seat, EI_DEVICE_CAP_KEYBOARD, EI_DEVICE_CAP_TEXT, nullptr);
+                        } else {
+                            ei_seat_bind_capabilities(seat, EI_DEVICE_CAP_KEYBOARD, nullptr);
+                        }
                     }
                 } else if (type == EI_EVENT_DEVICE_ADDED) {
                     auto* device = ei_event_get_device(event);
@@ -361,7 +369,8 @@ namespace
                                      ei_device_has_capability(device, EI_DEVICE_CAP_KEYBOARD),
                                      ei_device_has_capability(device, EI_DEVICE_CAP_TEXT));
                     }
-                    if (device && ei_device_has_capability(device, EI_DEVICE_CAP_TEXT) && !state.textDevice) {
+                    if (textEnabled && device && ei_device_has_capability(device, EI_DEVICE_CAP_TEXT)
+                        && !state.textDevice) {
                         state.textDevice = ei_device_ref(device);
                         log("compositor provided an EIS text device");
                     }
@@ -429,7 +438,7 @@ namespace
             // The keyboard device is mandatory; some compositors do not yet
             // expose the optional text device. Give the compositor one idle
             // round trip to announce it, then continue with keyboard events.
-            if (state.device && state.deviceEmulating && !state.textDevice && pollResult == 0) {
+            if (state.device && state.deviceEmulating && (!textEnabled || !state.textDevice) && pollResult == 0) {
                 break;
             }
         }
@@ -505,18 +514,27 @@ bool connectEis(const QDBusConnection& connection, const QString& session)
     return true;
 }
 
-void prepareInputMethod()
-{
-    if (std::getenv("KEEPASSXC_LIBEI_KEEP_INPUT_METHOD")) {
-        return;
+    void prepareInputMethod()
+    {
+        if (std::getenv("KEEPASSXC_LIBEI_KEEP_INPUT_METHOD")) {
+            return;
     }
     const auto result = std::system("env -u LD_PRELOAD fcitx5-remote -c");
     if (result != 0) {
         log("fcitx5-remote -c failed");
     } else {
-        log("input method disabled");
+            log("input method disabled");
+        }
     }
-}
+
+    void prepareInputMethodForKeyboard()
+    {
+        if (state.inputMethodPrepared) {
+            return;
+        }
+        state.inputMethodPrepared = true;
+        prepareInputMethod();
+    }
 
     // XWayland keeps X input focus on a 1x1 dummy window (position -1,-1, no
     // WM_CLASS) whenever a native Wayland surface holds keyboard focus. When an
@@ -923,6 +941,7 @@ void prepareInputMethod()
         // focus has settled on the target application.
         sampledKind = detectTargetKind();
         state.notified = false;
+        state.inputMethodPrepared = false;
     }
     state.lastInput = now;
     state.hasInput = true;
@@ -942,9 +961,7 @@ void prepareInputMethod()
         // so disable it for the sequence.
         if (sampledKind == TargetKind::X11) {
             state.targetKind = sampledKind;
-            if (newInput) {
-                prepareInputMethod();
-            }
+            prepareInputMethodForKeyboard();
             if (!sendKeyX11(keysym, pressed)) {
                 error = QStringLiteral("XTEST injection failed for keysym 0x%1").arg(keysym, 0, 16);
                 return false;
@@ -976,6 +993,7 @@ void prepareInputMethod()
         }
 
         if (const auto keycode = modifierKeycode(keysym)) {
+            prepareInputMethodForKeyboard();
             if (std::getenv("KEEPASSXC_LIBEI_DEBUG")) {
                 std::fprintf(stderr,
                              "keepassxc-libei: keyboard key keycode=%u pressed=%d source=modifier\n",
@@ -1045,6 +1063,7 @@ void prepareInputMethod()
             log("keysym is absent from the portal keymap");
             return false;
         }
+        prepareInputMethodForKeyboard();
         const auto modifiers = findRequiredModifiers(keysym);
         if (std::getenv("KEEPASSXC_LIBEI_DEBUG")) {
             std::fprintf(stderr,

@@ -18,7 +18,9 @@ without input, default 1 second).
 For a **native Wayland** target the backend sends printable Unicode keysyms as
 UTF-8 text through the EIS text device (libei 1.6 or newer). This allows
 characters that are absent from the active keyboard layout to be typed, and the
-input method is left untouched. Shortcut chords still use key events.
+input method is left untouched. Older compositors without an EIS text device
+fall back to the EIS keyboard; those key events switch the input method just
+like the X11 path. Shortcut chords also use key events and switch it.
 
 For an **X11/XWayland** target the backend keeps the keyboard keycode path and
 disables the input method with `fcitx5-remote -c` before injecting, so the input
@@ -93,15 +95,18 @@ KEEPASSXC_LIBEI_DEBUG=1 \
   LD_PRELOAD=/tmp/keepassxc-libei-build/libkeepassxc-libei.so keepassxc
 ```
 
-For an X11/XWayland target the backend runs `fcitx5-remote -c` before each
-auto-type sequence. A new sequence is detected after 1 second without input;
-adjust this with `KEEPASSXC_LIBEI_INPUT_METHOD_REARM_GAP_MS`. Set
-`KEEPASSXC_LIBEI_KEEP_INPUT_METHOD` to skip this and leave the input method
-untouched (useful for testing a native Wayland target while an input method is
-active).
+For an X11/XWayland target, or when a native Wayland target falls back from EIS
+UTF-8 text to EIS keyboard events, the backend runs `fcitx5-remote -c` before
+the first keyboard event of each auto-type sequence. The EIS UTF-8 path leaves
+the input method untouched. A new sequence is detected after 1 second without
+input; adjust this with `KEEPASSXC_LIBEI_INPUT_METHOD_REARM_GAP_MS`. Set
+`KEEPASSXC_LIBEI_KEEP_INPUT_METHOD` to skip switching entirely.
 
 The test sender accepts `KEEPASSXC_LIBEI_TEST_DELAY_MS` to change the countdown
 before typing (default 3000 ms), which gives more time to move focus.
+
+Set `KEEPASSXC_LIBEI_DISABLE_TEXT=1` to simulate a compositor without an EIS
+text device and exercise the Wayland EIS keyboard fallback.
 
 `keepassxc-libei-x11-receiver` is a small Qt window used to test injection. Run
 it with `QT_QPA_PLATFORM=xcb` for an X11 target (add `QT_IM_MODULE=fcitx` to give
