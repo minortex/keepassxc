@@ -120,3 +120,8 @@ running process. When `WAYLAND_DISPLAY` is present and
 `QT_QPA_PLATFORM` is unset, the preload library selects Qt's Wayland platform
 so KeePassXC does not select the X11 auto-type backend under a Wayland session.
 An explicitly set `QT_QPA_PLATFORM` is never overridden.
+
+Each auto-type sequence sends one desktop notification when its first key is
+successfully injected. The title names the actual delivery path: `Wayland EIS
+UTF-8`, `Wayland EIS 键盘`, or `X11 XTEST`. A sequence is detected after
+`KEEPASSXC_LIBEI_INPUT_METHOD_REARM_GAP_MS` without input, default 1 second.

@@ -7,6 +7,7 @@
 #include <QVariant>
 
 #include <libei.h>
+#include <libnotify/notify.h>
 #include <xkbcommon/xkbcommon.h>
 
 #include <X11/Xlib.h>
@@ -23,14 +24,18 @@
 #include <unistd.h>
 
 #include <algorithm>
-#include <cxxabi.h>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cxxabi.h>
+#include <deque>
 #include <mutex>
+#include <string>
+#include <thread>
 #include <vector>
 
 namespace
@@ -70,10 +75,11 @@ namespace
         xkb_keymap* keymap = nullptr;
         int keymapFd = -1;
         void* keymapData = nullptr;
-    size_t keymapSize = 0;
-    std::chrono::steady_clock::time_point lastInput;
-    bool hasInput = false;
-};
+        size_t keymapSize = 0;
+        std::chrono::steady_clock::time_point lastInput;
+        bool hasInput = false;
+        bool notified = false;
+    };
 
     State state;
 
@@ -82,6 +88,66 @@ namespace
         if (std::getenv("KEEPASSXC_LIBEI_DEBUG")) {
             std::fprintf(stderr, "keepassxc-libei: %s\n", message);
         }
+    }
+
+    class NotificationQueue
+    {
+    public:
+        NotificationQueue()
+            : worker([this] { run(); })
+        {
+        }
+
+        void push(std::string message)
+        {
+            {
+                std::lock_guard lock(mutex);
+                messages.push_back(std::move(message));
+            }
+            ready.notify_one();
+        }
+
+    private:
+        void run()
+        {
+            if (!notify_init("KeePassXC")) {
+                log("desktop notification initialization failed");
+                return;
+            }
+
+            while (true) {
+                std::string message;
+                {
+                    std::unique_lock lock(mutex);
+                    ready.wait(lock, [this] { return !messages.empty(); });
+                    message = std::move(messages.front());
+                    messages.pop_front();
+                }
+
+                auto* notification = notify_notification_new("KeePassXC", message.c_str(), "keepassxc");
+                notify_notification_set_timeout(notification, 1500);
+                GError* error = nullptr;
+                if (!notify_notification_show(notification, &error)) {
+                    log("desktop notification failed");
+                    if (error) {
+                        g_error_free(error);
+                    }
+                }
+                g_object_unref(notification);
+            }
+        }
+
+        std::mutex mutex;
+        std::condition_variable ready;
+        std::deque<std::string> messages;
+        std::thread worker;
+    };
+
+    void notifyInjected(const char* path, const QString& detail)
+    {
+        static auto* queue = new NotificationQueue;
+        const auto message = QStringLiteral("%1：%2").arg(QString::fromUtf8(path), detail);
+        queue->push(message.toStdString());
     }
 
     void logCall(const QDBusAbstractInterface* interface, const QString& method, size_t argumentCount)
@@ -740,6 +806,10 @@ void prepareInputMethod()
             } else {
                 state.heldModifiers &= ~bit;
             }
+            if (!state.notified) {
+                state.notified = true;
+                notifyInjected("X11 XTEST", QStringLiteral("自动输入已生效"));
+            }
             return true;
         }
 
@@ -852,6 +922,7 @@ void prepareInputMethod()
         // window is already hidden by the time the first keysym arrives, so the
         // focus has settled on the target application.
         sampledKind = detectTargetKind();
+        state.notified = false;
     }
     state.lastInput = now;
     state.hasInput = true;
@@ -877,6 +948,10 @@ void prepareInputMethod()
             if (!sendKeyX11(keysym, pressed)) {
                 error = QStringLiteral("XTEST injection failed for keysym 0x%1").arg(keysym, 0, 16);
                 return false;
+            }
+            if (!state.notified) {
+                state.notified = true;
+                notifyInjected("X11 XTEST", QStringLiteral("自动输入已生效"));
             }
             return true;
         }
@@ -956,6 +1031,10 @@ void prepareInputMethod()
                 }
                 ei_device_text_utf8_with_length(state.textDevice, utf8.constData(), utf8.size());
                 ei_device_frame(state.textDevice, ei_now(state.context));
+                if (!state.notified) {
+                    state.notified = true;
+                    notifyInjected("Wayland EIS UTF-8", QStringLiteral("自动输入已生效"));
+                }
             }
             return true;
         }
@@ -992,6 +1071,10 @@ void prepareInputMethod()
                 ei_device_keyboard_key(state.device, *it, false);
                 ei_device_frame(state.device, ei_now(state.context));
             }
+        }
+        if (!state.notified) {
+            state.notified = true;
+            notifyInjected("Wayland EIS 键盘", QStringLiteral("自动输入已生效"));
         }
         return true;
     }
